@@ -3,6 +3,8 @@
 //   xpm check    <manifest.json> [--repos .xpm-repos.json] [--projects .xpm-projects.json]
 //   xpm runs     <manifest.json> --pipeline ID --events DIR
 //   xpm simulate <manifest.json> --pipeline ID --events DIR --draft draft.json [--spec out.md]
+//   xpm propose  <manifest.json> --pipeline ID --file proposed.json --state DIR [--repos FILE] [--job ID]
+//                (puts a new map in the state folder as a proposal; the page shows it and a person accepts it)
 //   xpm prune    <events-dir> --days 14          (deletes old events AND previews)
 
 const fs = require("fs");
@@ -35,7 +37,7 @@ function main() {
   const a = args(rest);
   const manifestFile = a._[0];
   if (!cmd || !manifestFile) {
-    console.log("usage: xpm check|runs|simulate <manifest.json> [options]");
+    console.log("usage: xpm check|runs|simulate|propose <manifest.json> [options]");
     return 2;
   }
   if (cmd === "prune") {
@@ -66,6 +68,29 @@ function main() {
       if (t.untraced.length) console.log(`     note: ${t.untraced.length} of ${p.nodes.length} steps have no trace call: ${t.untraced.join(", ")}`);
     }
     return report.every((r) => r.ok) ? 0 : 1;
+  }
+
+  if (cmd === "propose") {
+    if (!a.file || !a.state) throw new Error("propose needs --file (the proposed map) and --state (XPM's state folder)");
+    const current = pipelineOf(manifest, a.pipeline);
+    const repos = xpm.loadRepos(a.repos || process.env.XPM_REPOS || path.join(ROOT, ".xpm-repos.json"));
+    // The file is the proposed pipeline itself, or { pipeline, changes, unsure, model }.
+    const given = readJson(a.file);
+    const { pipeline: proposed, ...about } = given && given.pipeline && !given.nodes ? given : { pipeline: given };
+    const jobId = a.job || `hand-${new Date().toISOString().replace(/[-:]|\..*/g, "")}`;
+    const proposal = xpm.makeProposal(current, proposed, repos, { ...about, jobId });
+    const out = xpm.proposalFile(a.state, manifest.id, current.id, jobId);
+    if (fs.existsSync(out)) throw new Error(`a proposal named ${jobId} is already there`);
+    const check = xpm.checkProposal(current, proposal, repos);
+    fs.mkdirSync(path.dirname(out), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(out, JSON.stringify(proposal, null, 1), { mode: 0o600 });
+    console.log(`proposal ${jobId} written to ${out}`);
+    if (check.diff) {
+      const n = check.diff.nodes, e = check.diff.edges;
+      console.log(`     steps: ${n.added.length} added, ${n.removed.length} removed, ${n.changed.length} changed · links: ${e.added.length} added, ${e.removed.length} removed, ${e.changed.length} changed${check.diff.other.length ? ` · also: ${check.diff.other.join(", ")}` : ""}`);
+    }
+    console.log(check.ok ? "     it can be accepted on the page" : `     it cannot be accepted: ${xpm.whyNot(check)}`);
+    return check.ok ? 0 : 1;
   }
 
   const p = pipelineOf(manifest, a.pipeline);

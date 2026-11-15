@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { spawn, execFileSync } = require("node:child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -345,5 +345,122 @@ test("writes carry the login only when the login gate is on, and a state folder 
   assert.match(res.json().error, /could not write to its state folder/);
   assert.ok(!res.text.includes(f.dir));
   assert.equal((await get(s.port, f.api)).json().notes.length, 0);
+  s.child.kill();
+});
+
+// A copy of the example bot with one proposal waiting: a new step between the door and the mode gate.
+function proposedBot(jobId = "job-1") {
+  const f = movedBot();
+  const current = f.manifest.pipelines[0];
+  const proposed = JSON.parse(JSON.stringify(current));
+  proposed.nodes.push({ id: "audit", name: "Audit", kind: "hook", lane: proposed.nodes[0].lane, anchor: { repo: "moved", path: "src/door.js", symbol: "receiveUpdate" } });
+  proposed.edges.push({ from: "receive", to: "audit" });
+  fs.writeFileSync(path.join(f.dir, "proposed.json"), JSON.stringify({ pipeline: proposed, model: "by hand", changes: [{ node: "audit", reason: "The door writes an audit line.", evidence: [{ file: "src/door.js", lines: "3" }] }], unsure: ["Whether the audit runs for repeats."] }));
+  const propose = (job, file = "proposed.json") => execFileSync(process.execPath, ["bin/xpm.js", "propose", path.join(f.dir, "manifests/moved-bot.json"), "--pipeline", "inbound", "--file", path.join(f.dir, file), "--state", f.env.XPM_STATE_DIR, "--repos", f.env.XPM_REPOS, "--job", job], { cwd: ROOT, encoding: "utf8" });
+  const said = propose(jobId);
+  const profiles = path.join(f.dir, "projects.json");
+  const writable = (on) => fs.writeFileSync(profiles, JSON.stringify({ "moved-bot": { truth: { repo: "moved" }, map: { writable: on } } }));
+  const onDisk = () => JSON.parse(fs.readFileSync(path.join(f.dir, "manifests/moved-bot.json"), "utf-8")).pipelines[0];
+  return { ...f, env: { ...f.env, XPM_PROJECTS: profiles }, current, proposed, said, propose, writable, onDisk };
+}
+const own = { "Sec-Fetch-Site": "same-origin" };
+
+test("proposals: shown with XPM's own comparison, and accepting is off unless the profile allows it", async () => {
+  const f = proposedBot();
+  assert.match(f.said, /proposal job-1 written/);
+  assert.match(f.said, /steps: 1 added, 0 removed, 0 changed · links: 1 added, 0 removed, 0 changed/);
+  assert.match(f.said, /it can be accepted on the page/);
+  assert.throws(() => f.propose("job-1"), /already there/);
+  const s = start(f.env);
+  await s.ready;
+  const first = (await get(s.port, f.api)).json();
+  assert.equal(first.mapSha.length, 64);
+  assert.equal(first.proposals.canAccept, false);
+  assert.equal(first.proposals.undo, null);
+  assert.deepEqual(first.proposals.waiting.map((w) => [w.jobId, w.ok, w.model, w.nodes.added, w.edges.added]), [["job-1", true, "by hand", 1, 1]]);
+  const one = (await get(s.port, `${f.api}/proposals/job-1`)).json();
+  assert.equal(one.check.ok, true);
+  assert.equal(one.canAccept, false);
+  assert.deepEqual(one.check.diff.nodes.added, ["audit"]);
+  assert.deepEqual(one.proposal.changes, [{ node: "audit", reason: "The door writes an audit line.", evidence: [{ file: "src/door.js", lines: "3" }] }]);
+  assert.deepEqual(one.proposal.unsure, ["Whether the audit runs for repeats."]);
+  assert.equal(one.pipeline.nodes.length, f.current.nodes.length + 1);
+  assert.equal(one.proposal.basedOnCode, undefined);
+  // No profile, or a profile that does not say so: nothing is written.
+  for (const route of ["proposals/job-1/accept", "undo"]) {
+    const r = await get(s.port, `${f.api}/${route}`, own, {});
+    assert.equal(r.status, 403);
+    assert.match(r.json().error, /Accepting is off for this project on this machine/);
+  }
+  f.writable(false);
+  assert.equal((await get(s.port, `${f.api}/proposals/job-1/accept`, own, {})).status, 403);
+  assert.deepEqual(f.onDisk(), f.current);
+  assert.equal((await get(s.port, `${f.api}/proposals/..%2Fx`)).status, 400);
+  assert.equal((await get(s.port, `${f.api}/proposals/none`)).status, 404);
+  s.child.kill();
+});
+
+test("proposals: accept writes the map, undo puts it back, discard ends it, all only from the page itself", async () => {
+  const f = proposedBot();
+  f.writable(true);
+  const s = start(f.env);
+  await s.ready;
+  // Another site, or a form post, cannot accept, discard or undo.
+  for (const route of ["proposals/job-1/accept", "proposals/job-1/discard", "undo"]) {
+    assert.equal((await get(s.port, `${f.api}/${route}`, { "Sec-Fetch-Site": "cross-site" }, {})).status, 403);
+    assert.equal((await get(s.port, `${f.api}/${route}`, { ...own, "Content-Type": "text/plain" }, {})).status, 415);
+  }
+  assert.deepEqual(f.onDisk(), f.current);
+  assert.equal((await get(s.port, f.api)).json().proposals.canAccept, true);
+  assert.equal((await get(s.port, `${f.api}/undo`, own, {})).status, 409);
+
+  assert.equal((await get(s.port, `${f.api}/proposals/job-1/accept`, own, {})).status, 200);
+  assert.deepEqual(f.onDisk(), f.proposed);
+  const after = (await get(s.port, f.api)).json();
+  assert.ok(after.pipeline.nodes.some((n) => n.id === "audit"));
+  assert.equal(after.since.stamp.how, "from a proposal");
+  assert.deepEqual([after.since.changed, after.since.uncovered], [[], []]);
+  assert.deepEqual(after.proposals.waiting, []);
+  assert.equal(after.proposals.undo.jobId, "job-1");
+  const again = await get(s.port, `${f.api}/proposals/job-1/accept`, own, {});
+  assert.equal(again.status, 409);
+  assert.match(again.json().error, /already accepted/);
+
+  assert.equal((await get(s.port, `${f.api}/undo`, own, {})).status, 200);
+  assert.deepEqual(f.onDisk(), f.current);
+  const back = (await get(s.port, f.api)).json();
+  assert.equal(back.since.stamp, null);
+  assert.equal(back.proposals.undo, null);
+  assert.equal(back.proposals.waiting.length, 1);
+
+  assert.equal((await get(s.port, `${f.api}/proposals/job-1/discard`, own, {})).status, 200);
+  assert.deepEqual((await get(s.port, f.api)).json().proposals.waiting, []);
+  assert.equal((await get(s.port, `${f.api}/proposals/job-1/accept`, own, {})).status, 409);
+  assert.deepEqual(f.onDisk(), f.current);
+  s.child.kill();
+});
+
+test("proposals: one that no longer fits the map or the code is shown with the reason and refused", async () => {
+  const f = proposedBot();
+  f.writable(true);
+  // A second proposal whose new step is not in the code.
+  const lost = JSON.parse(JSON.stringify(f.proposed));
+  lost.nodes[lost.nodes.length - 1].anchor.symbol = "notInTheCode";
+  fs.writeFileSync(path.join(f.dir, "lost.json"), JSON.stringify(lost));
+  assert.throws(() => f.propose("job-lost", "lost.json"), (e) => e.status === 1 && /cannot be accepted: 1 of its steps do not match the code/.test(String(e.stdout)));
+  const s = start(f.env);
+  await s.ready;
+  const r = await get(s.port, `${f.api}/proposals/job-lost/accept`, own, {});
+  assert.equal(r.status, 409);
+  assert.match(r.json().error, /1 of its steps do not match the code/);
+  // The code moves after job-1 was made.
+  fs.appendFileSync(path.join(f.dir, "code/src/door.js"), "// edited after the proposal\n");
+  const list = (await get(s.port, f.api)).json().proposals.waiting;
+  assert.deepEqual(list.map((w) => [w.jobId, w.ok]).sort(), [["job-1", false], ["job-lost", false]]);
+  assert.match(list.find((w) => w.jobId === "job-1").why, /code changed after this proposal was made/);
+  const late = await get(s.port, `${f.api}/proposals/job-1/accept`, own, {});
+  assert.equal(late.status, 409);
+  assert.match(late.json().error, /code changed after/);
+  assert.deepEqual(f.onDisk(), f.current);
   s.child.kill();
 });
