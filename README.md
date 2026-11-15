@@ -132,7 +132,48 @@ Runs can only light a step when the product's code names that step, with the sam
 
 Tap a step and write a note in its panel: a question, something to change, something to remember. **Select more steps** turns taps into picks, so one note can be about several steps at once. A step with notes shows a count; **Notes** in the footer lists them all, newest first, and **Show the steps** picks a note's steps on the map. Delete asks for a second tap.
 
-Stamps and notes are the only things the page writes. They live in XPM's own state folder (`state/` beside `drafts/`, or `XPM_STATE_DIR`), as small JSON files only the user running XPM can read: `stamps/<project>/<pipeline>.json` and `notes/<project>.json`. Never in the project, never in git. A note holds 2000 characters at most, a project 500 notes. Writes are taken only from XPM's own page (the browser's `Sec-Fetch-Site`, or an `Origin` equal to the host it is served under) and only as JSON, so another site open in the same browser cannot write here.
+Stamps and notes are the only things the page writes, apart from accepting a proposed map (next section). They live in XPM's own state folder (`state/` beside `drafts/`, or `XPM_STATE_DIR`), as small JSON files only the user running XPM can read: `stamps/<project>/<pipeline>.json` and `notes/<project>.json`. Never in the project, never in git. A note holds 2000 characters at most, a project 500 notes. Writes are taken only from XPM's own page (the browser's `Sec-Fetch-Site`, or an `Origin` equal to the host it is served under) and only as JSON, so another site open in the same browser cannot write here.
+
+### Proposed maps: a new version waits for your yes
+
+Someone, or something, can put a whole new version of a map beside the old one. XPM never takes it over by itself. It shows that a proposal waits, what it would change, and whether it fits; **Accept** puts it in place, and the map as it was is kept.
+
+- **A proposal is one file**: `proposals/<project>/<pipeline>/<job>.json` in the state folder. XPM only reads it and never changes it.
+
+  ```json
+  {
+    "v": 1, "jobId": "hand-2026-01-01", "createdAt": "2026-01-01T10:00:00.000Z",
+    "basedOnMapSha": "<fingerprint of the map it was made from>",
+    "basedOnCode": { "example:src/door.js": "<sha256 of that file when it was read>" },
+    "pipeline": { "the whole proposed map": "same shape as a pipeline in the manifest" },
+    "changes": [{ "node": "audit", "reason": "one line", "evidence": [{ "file": "src/door.js", "lines": "10" }] }],
+    "unsure": ["one line each"], "model": "who or what made it"
+  }
+  ```
+
+- **XPM works out the difference itself**, from the two maps. `changes` and `unsure` are the proposal's own words: shown under the step they are about, cut to one line each, never trusted for what changed.
+- **A proposal can be accepted only when all of this holds**, checked when you look and again at the moment you accept:
+  - the map is still the one the proposal was made from;
+  - every file the proposed map points at is still what it was when the proposal was made;
+  - the proposed map is a sound pipeline and changes something;
+  - every step that points at code is found there.
+
+  Otherwise Accept is off and the page says which of these failed.
+- **Look at it** draws the proposed map: new steps and links in dashed blue, changed steps flagged. The side lists every difference; tap a step for its fields before and after, and the proposal's reason.
+- **Accept** asks for a second tap, then: keeps the map as it was (`history/<project>/<pipeline>/`, the last 20), writes the manifest file (to a temp file beside it, then renamed, so a crash leaves the old one whole; the file is written again as JSON with its own indent), marks the new map as checked, and notes the decision (`decisions/<project>/<pipeline>.json`).
+- **Undo** on the Map puts the last accepted map back, with its check, and the proposal waits again. It is refused when the map file was changed since, so nothing done by hand is overwritten.
+- **Discard** only notes the decision. The map and the proposal file stay.
+- **Accept and Undo are off until the project's source profile says `"map": { "writable": true }`.** That is a statement about this machine: the manifest folder here is the real one, and XPM's user may write it. Where the manifests are a copy synced from elsewhere, leave it off.
+- Limits: a proposal file is 1 MB at most and 200 steps; the 30 newest files of a pipeline are read. A file that is not a proposal is counted on the Map and left alone.
+
+To make one by hand, edit a copy of the pipeline and run:
+
+```bash
+node bin/xpm.js propose manifests/my-project.json --pipeline inbound --file proposed.json \
+  --state state --repos .xpm-repos.json
+```
+
+`proposed.json` is the proposed pipeline, or `{ "pipeline": …, "changes": […], "unsure": […], "model": "…" }`. The command records the fingerprints, writes the proposal file, prints what would change, and exits 1 with the reason when it could not be accepted as it is.
 
 ### Try it
 
@@ -220,6 +261,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | `runsOn` | The machine where the truth and the traces are readable. On any other machine Setup says so. |
 | `traces` | Who writes them, whether previews of typed text are on, and what is never previewed. The events folder itself is `XPM_EVENTS_DIR/<project>`. Previews are shown only when `previews` is `true` here, whatever is on disk. |
 | `traces.calls` | Optional. Where the code names its steps to the tracer: a list of `{ "path", "pattern", "pipeline" }`. `path` is a file or folder inside the truth repo. `pattern` is optional, a regular expression (300 characters at most) with one group in brackets around the step id, for example `"markStep\\('([\\w-]+)'\\)"`. `pipeline` is optional and keeps the entry to one pipeline. See "Does the code report the steps the map shows?". |
+| `map.writable` | Optional, `true` or `false` (off when absent). Whether XPM may write this project's manifest file on this machine, which is what **Accept** and **Undo** of a proposed map do. See "Proposed maps". |
 | `access` | A label. The real gate is `XPM_ALLOWED_LOGINS` or `XPM_ALLOWED_NODES`. A project with no gate that is reachable from other devices is flagged in Setup, previews or not (unless `public: true`, for synthetic data). |
 | `mapOwner`, `confirmed` | Who confirms the map against the truth, and when they last did, written by hand. **Mark as checked** on the Map is the live form of this: it also notices when the code moves on. |
 
@@ -230,7 +272,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 - `XPM_ALLOWED_LOGINS` (comma separated, for example `you@example.com`): behind `tailscale serve`, only these Tailscale logins get in; everyone else, and tagged devices (which send no login), get 403.
 - `XPM_ALLOWED_NODES` and `XPM_DENIED_NODES` (comma separated device names, for example `my-laptop,my-phone`): one login can own many devices, and these let in or keep out single ones. XPM takes the caller's tailnet address from the last entry of `X-Forwarded-For` (set by `tailscale serve`) and asks `tailscale whois` which device it is. A denied device gets 403; with an allowed list, only listed devices get in. No address, or no answer from tailscale, also means 403. `XPM_TAILSCALE_BIN` names the binary when it is not on the path.
 - XPM refuses to start with a login or device list unless `HOST` is loopback, because the proxy's headers could otherwise be forged. Set a gate before turning on previews.
-- `XPM_STATE_DIR`: where **Mark as checked** and notes are kept. The user XPM runs as must be able to write there (under systemd with a read-only home, add it to `ReadWritePaths`). Everyone who can open XPM can write notes and mark a map as checked, so the gates above are also the gate for writing.
+- `XPM_STATE_DIR`: where **Mark as checked** and notes are kept. The user XPM runs as must be able to write there (under systemd with a read-only home, add it to `ReadWritePaths`). Everyone who can open XPM can write notes and mark a map as checked, so the gates above are also the gate for writing. Proposed maps are read from `proposals/` here, and `history/` and `decisions/` are written here; with `map.writable` on, XPM's user must also be able to write the manifest folder.
 
 ### API
 
@@ -242,8 +284,12 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | `POST /api/project/:id/pipeline/:pid/stamp` | marks the map as checked against the code as it is now; `409` when a step does not match the code |
 | `POST /api/project/:id/pipeline/:pid/notes` | saves a note `{ nodes: [step ids], text }`; returns the notes |
 | `DELETE /api/project/:id/pipeline/:pid/notes/:noteId` | deletes one note; returns the notes |
+| `GET /api/project/:id/pipeline/:pid/proposals/:job` | one waiting proposal: its words, the proposed map, XPM's check and comparison |
+| `POST /api/project/:id/pipeline/:pid/proposals/:job/accept` | puts the proposal in place of the map; `403` unless the profile says `map.writable`, `409` when it no longer fits |
+| `POST /api/project/:id/pipeline/:pid/proposals/:job/discard` | notes that the proposal was turned down |
+| `POST /api/project/:id/pipeline/:pid/undo` | puts back the map as it was before the last accept; `409` when the map was changed since |
 
-The pipeline answer also carries `check.traces` (the steps the code reports, the ones it reports that the map lacks, and the map's steps no trace call names; `null` when the profile names no trace calls), `since` (the last check, the code version, the steps and files that changed) and `notes`. The three writing routes are the only ones that write, and only into the state folder.
+The pipeline answer also carries `check.traces` (the steps the code reports, the ones it reports that the map lacks, and the map's steps no trace call names; `null` when the profile names no trace calls), `since` (the last check, the code version, the steps and files that changed), `notes`, `mapSha` (the map's fingerprint) and `proposals` (the ones that wait, whether this machine may accept, and the last accept if it can be undone). Stamps, notes and discards write only into the state folder. Accept and Undo are the only routes that write a manifest file, and only for a project whose profile allows it.
 
 ### Credits
 

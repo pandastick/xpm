@@ -35,6 +35,7 @@ const S = {
   multi: false, sel: [],              // Map: several steps picked at once, to write one note about them
   side: null,                         // Map: "since" lists what changed in the code, "notes" lists every note
   noteText: "", busy: null, writeError: null, confirm: null, writes: 0,
+  proposal: null,                     // Map: a proposed new map being looked at { jobId, data, error, node }
 };
 
 // ---------- helpers ----------
@@ -105,6 +106,8 @@ const sinceIds = () => new Set(since()?.changed || []);
 const notes = () => S.data?.notes || [];
 // Which steps the code reports to the tracer. Null when the project's profile does not say where to look.
 const traces = () => S.data?.check?.traces || null;
+const proposals = () => S.data?.proposals || { waiting: [], unreadable: 0, canAccept: false, undo: null };
+const edgeKey = (e) => `${e.from}->${e.to}${e.when ? `[${e.when.decision}=${e.when.equals}]` : ""}`;
 const notesOn = (ids) => { const set = new Set(ids); return notes().filter((n) => n.nodes.some((id) => set.has(id))); };
 
 function outcome(path, run, p = pipeline()) {
@@ -248,6 +251,7 @@ function footer(states, note, zoomable = true, extra = "") {
     ghost: '<li><span class="sw ghost"></span>ghost</li>',
     cold: '<li><span class="sw cold"></span>cold</li>',
     draft: '<li><span class="sw draft"></span>draft</li>',
+    proposed: '<li><span class="sw draft"></span>new in the proposal</li>',
   };
   const fams = new Set((zoomable ? pipeline()?.nodes || [] : []).map((n) => FAMILY[n.kind]).filter(Boolean));
   const key = fams.size > 1 ? `<div class="seg key" role="group" aria-label="What the colours mean. Tap one to single it out.">${FAMILIES.filter(([f]) => fams.has(f)).map(([f, label]) => `<button type="button" class="f-${f}" aria-pressed="${S.kind === f}" data-act="kind" data-arg="${f}"><i class="fd f-${f}"></i>${label}</button>`).join("")}</div>` : "";
@@ -287,7 +291,7 @@ function canvas(p, L, look, edgeLook, extras = "", overlayHtml = "") {
     const no = (p.lanes || []).indexOf(b.name) + 1;
     const what = p.laneNotes?.[b.name];
     const title = `${no ? `<span class="no">${no}</span>` : ""}<b>${esc(b.name.toUpperCase())}</b> <span class="dim">· ${count}${what ? ` · ${esc(what)}` : ""}</span>`;
-    return `<div class="band" style="left:${b.left}px;top:${b.top}px;width:${b.width}px;height:${b.height}px"></div>${S.view === "map" && S.lens === "overview" ? `<button type="button" class="band-h fold" style="left:${b.left + 8}px;top:${b.top + 4}px" data-act="fold-lane" data-arg="${esc(b.name)}" aria-expanded="true" aria-label="Fold the ${esc(b.name)} lane${what ? `: ${esc(what)}` : ""}">${title}<span class="cue">${SVG.up}fold</span></button>` : `<span class="band-h" style="left:${b.left + 16}px;top:${b.top + 12}px;max-width:${b.width - 32}px">${title}</span>`}`;
+    return `<div class="band" style="left:${b.left}px;top:${b.top}px;width:${b.width}px;height:${b.height}px"></div>${S.view === "map" && S.lens === "overview" && !S.proposal ? `<button type="button" class="band-h fold" style="left:${b.left + 8}px;top:${b.top + 4}px" data-act="fold-lane" data-arg="${esc(b.name)}" aria-expanded="true" aria-label="Fold the ${esc(b.name)} lane${what ? `: ${esc(what)}` : ""}">${title}<span class="cue">${SVG.up}fold</span></button>` : `<span class="band-h" style="left:${b.left + 16}px;top:${b.top + 12}px;max-width:${b.width - 32}px">${title}</span>`}`;
   }).join("");
   const cards = [...L.xy.keys()].map((id) => {
     const n = byId.get(id) || { id, name: id, kind: "unknown" };
@@ -351,6 +355,7 @@ function mapLook(states) {
 }
 
 function viewMap() {
+  if (S.proposal) return viewProposal();
   const full = pipeline();
   if (!S.lens) {
     // Overview first when every step would not fit at a readable size.
@@ -387,7 +392,7 @@ function viewMap() {
   const body = canvas(p, L, lookPick, edgeLook);
   const ghosts = S.data.overlay.ghosts || [];
   const note = `hits and median time · last ${S.data.runs.length} runs · updated ${agoWords(S.fetchedAt)}`;
-  const strip = setupStrips() + sinceStrip() + traceStrips() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
+  const strip = setupStrips() + proposalStrips() + sinceStrip() + traceStrips() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
   if (ghosts.length) states.add("ghost");
   // Runs that carry no steps: say it once, or the map looks broken.
   const bare = S.data.runs.length - (S.data.overlay.tracedCount || 0);
@@ -400,6 +405,118 @@ function viewMap() {
   const notesBtn = all ? `<button type="button" class="btn quiet" data-act="side" data-arg="notes" aria-pressed="${S.side === "notes" && !S.multi && !S.panelNode}">${SVG.note}Notes ${all}</button>` : "";
   const side = S.multi ? selPanel() : S.panelNode ? nodePanel(S.panelNode) : S.side === "since" ? sincePanel() : S.side === "notes" ? notesPanel() : S.side === "untraced" ? untracedPanel() : "";
   return `<div class="body"><main class="main">${strip}${blind}${cleaned}${body}${footer(states, note, true, lens + notesBtn)}</main>${side}</div>`;
+}
+
+// ---------- proposals: a whole new map waiting for a yes ----------
+// "2 steps added, 1 changed, 1 link removed": what a proposal would do, from XPM's own comparison.
+function changeWords(nodes, edges, other) {
+  const part = (n, one, word) => (n ? `${plural(n, one)} ${word}` : "");
+  const out = [part(nodes?.added, "step", "added"), part(nodes?.changed, "step", "changed"), part(nodes?.removed, "step", "removed"), part(edges?.added, "link", "added"), part(edges?.changed, "link", "changed"), part(edges?.removed, "link", "removed"), other ? plural(other, "other thing") : ""].filter(Boolean);
+  return out.join(", ");
+}
+
+function proposalStrips() {
+  const ps = proposals();
+  let out = "";
+  // The last accept can be put back for a week; after that the strip steps away.
+  const u = ps.undo;
+  if (u && Date.now() - Date.parse(u.at) < 7 * 86400000) {
+    const busy = S.busy === "undo";
+    const err = S.writeError?.at === "undo" ? `<span class="err" role="alert">${esc(S.writeError.text)}</span>` : "";
+    const ask = S.confirm === "undo" || busy
+      ? `<span class="muted">This puts the map file back as it was before.</span><button type="button" class="btn primary" data-act="undo"${busy ? " disabled" : ""}>${busy ? `${SVG.spin}Putting it back` : "Yes, undo"}</button><button type="button" class="btn quiet" data-act="cancel"${busy ? " disabled" : ""}>Cancel</button>`
+      : `<button type="button" class="btn quiet" data-act="ask-undo">Undo</button>`;
+    out += `<div class="strip quiet prop-strip"><div class="row"><span class="muted">This map was updated ${esc(dayTime(u.at))} from a proposal${u.by ? `, accepted by ${esc(u.by)}` : ""}. The map as it was is kept.</span>${err}</div><div class="row">${ask}</div></div>`;
+  }
+  const w = ps.waiting[0];
+  if (w) {
+    const what = w.nodes ? changeWords(w.nodes, w.edges, w.other) : "";
+    const more = ps.waiting.length - 1;
+    out += `<div class="strip prop-strip"><div class="row"><span class="tag-draft">proposal</span><span>A new version of this map is waiting${what ? `: ${esc(what)}` : ""}. <span class="muted">Made ${esc(dayTime(w.createdAt))}${w.model ? ` · ${esc(w.model)}` : ""}${more ? ` · ${plural(more, "older proposal")} also ${more === 1 ? "waits" : "wait"}` : ""}.</span>${w.ok ? "" : ` <span class="muted">It cannot be accepted as it is.</span>`}</span></div><button type="button" class="btn" data-act="open-proposal" data-arg="${esc(w.jobId)}">Look at it</button></div>`;
+  }
+  if (ps.unreadable) out += `<div class="strip quiet"><div class="row"><span class="muted">${plural(ps.unreadable, "proposal file")} could not be read as a proposal and ${ps.unreadable === 1 ? "is" : "are"} left alone.</span></div></div>`;
+  return out;
+}
+
+// A value from a map, short enough to read in the side panel.
+function fieldText(key, v) {
+  if (v === undefined || v === null || v === "") return "nothing";
+  if (key === "anchor" && typeof v === "object") return `${v.path || ""}${v.symbol ? ` · ${v.symbol}` : ""}`;
+  const t = typeof v === "string" ? v : JSON.stringify(v);
+  return t.length > 160 ? `${t.slice(0, 160)}…` : t;
+}
+
+function viewProposal() {
+  const pr = S.proposal, d = pr.data;
+  const close = `<button type="button" class="btn quiet" data-act="close-proposal">Back to the map</button>`;
+  if (!d) {
+    return `<div class="body"><main class="main"><div class="strip prop-strip"><div class="row"><span class="tag-draft">proposal</span>${pr.error ? `<span class="err" role="alert">${esc(pr.error)}</span>` : `<span class="muted">${SVG.spin}Reading the proposal</span>`}</div>${close}</div><div class="center"></div>${footer(new Set(), "", false)}</main></div>`;
+  }
+  const cur = pipeline(), next = d.pipeline, c = d.check, diff = c.diff;
+  const busy = S.busy === "accept" || S.busy === "discard";
+  const err = ["accept", "discard"].includes(S.writeError?.at) ? `<span class="err" role="alert">${esc(S.writeError.text)}</span>` : "";
+  // Accept is live only when XPM's own check passed and this machine may write the map file.
+  const blocked = !c.ok ? c.why : !d.canAccept ? "Accepting is off for this project on this machine: its profile does not say that XPM may write the map file here." : "";
+  let acts;
+  if (S.confirm === "accept" || S.busy === "accept") acts = `<span class="muted">This writes the map file. The map as it is now is kept and can be put back.</span><button type="button" class="btn primary" data-act="accept"${busy ? " disabled" : ""}>${busy ? `${SVG.spin}Writing the map` : "Yes, accept"}</button><button type="button" class="btn quiet" data-act="cancel"${busy ? " disabled" : ""}>Cancel</button>`;
+  else if (S.confirm === "discard" || S.busy === "discard") acts = `<span class="muted">The proposal goes away. The map stays as it is.</span><button type="button" class="btn primary" data-act="discard-proposal"${busy ? " disabled" : ""}>${busy ? `${SVG.spin}Discarding` : "Yes, discard"}</button><button type="button" class="btn quiet" data-act="cancel"${busy ? " disabled" : ""}>Cancel</button>`;
+  else acts = `<button type="button" class="btn primary" data-act="ask-accept"${blocked ? " disabled" : ""}>Accept</button><button type="button" class="btn quiet" data-act="ask-discard">Discard</button>${close}`;
+  const what = diff ? changeWords({ added: diff.nodes.added.length, changed: diff.nodes.changed.length, removed: diff.nodes.removed.length }, { added: diff.edges.added.length, changed: diff.edges.changed.length, removed: diff.edges.removed.length }, diff.other.length) : "";
+  const strip = `<div class="strip prop-strip"><div class="row"><span class="tag-draft">proposal</span><span><b>${esc(what || "A new version of this map")}</b> <span class="muted">· made ${esc(dayTime(d.proposal.createdAt))}${d.proposal.model ? ` · ${esc(d.proposal.model)}` : ""} · not the map yet</span></span>${err}</div><div class="row">${acts}</div></div>
+    ${blocked ? `<div class="strip quiet prop-why"><div class="row"><span class="red">${c.ok ? "Accept is off here." : "Cannot be accepted."}</span><span>${esc(blocked)}</span></div></div>` : ""}`;
+
+  // A proposed map that does not hold together is never drawn: the reasons are shown instead.
+  if (!diff) {
+    return `<div class="body"><main class="main">${strip}<div class="empty wide"><b class="red">This proposed map cannot be drawn.</b><ul class="errs">${c.errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>${footer(new Set(), "a proposal · not the map", false)}</main></div>`;
+  }
+  const added = new Set(diff.nodes.added), changed = new Set(diff.nodes.changed.map((x) => x.id));
+  const newEdges = new Set([...diff.edges.added, ...diff.edges.changed.map((x) => x.id)]);
+  const badAt = new Map(c.anchors.filter((a) => ["missing-file", "missing-symbol", "no-repo"].includes(a.status)).map((a) => [a.node, a]));
+  const L = layout(next);
+  const look = (n) => {
+    const v = { cls: "", flag: "", stat: "", act: "prop-node", expanded: pr.node === n.id };
+    if (added.has(n.id)) { v.cls = "draft"; v.flag = "new"; }
+    else if (changed.has(n.id)) { v.cls = "changed"; v.flag = "changed"; }
+    if (badAt.has(n.id)) v.stat = "not in the code";
+    v.aria = [n.name, n.kind, added.has(n.id) ? "new in this proposal" : changed.has(n.id) ? "changed in this proposal" : "as it is on the map", v.stat].filter(Boolean).join(", ");
+    return v;
+  };
+  const edgeLook = (e) => (newEdges.has(edgeKey(e)) ? { stroke: "#60a5fa", width: 1.2, dash: true, chip: "draft" } : { stroke: "#4a4a50", width: 1.2 });
+
+  // The side list: every difference, worked out by XPM. The proposal's own words sit under the step they are about.
+  const said = (id) => d.proposal.changes.filter((x) => x.node === id);
+  const curNode = (id) => cur.nodes.find((n) => n.id === id), nextNode = (id) => next.nodes.find((n) => n.id === id);
+  const why = (id) => said(id).map((x) => `<p class="said">${x.reason ? esc(x.reason) : ""}${x.evidence.length ? ` <span class="muted">${x.evidence.map((e) => `${esc(e.file)}${e.lines ? ` line ${esc(e.lines)}` : ""}`).join(", ")}</span>` : ""}</p>`).join("");
+  const item = (id, kind) => {
+    const n = kind === "removed" ? curNode(id) : nextNode(id);
+    const open = pr.node === id;
+    const bad = badAt.get(id);
+    let more = "";
+    if (open) {
+      const rows = kind === "changed"
+        ? diff.nodes.changed.find((x) => x.id === id).fields.map((f) => `<dt>${esc(f)}</dt><dd><span class="was">${esc(fieldText(f, curNode(id)?.[f]))}</span><span class="now">${esc(fieldText(f, n?.[f]))}</span></dd>`).join("")
+        : [["kind", n?.kind], ["lane", n?.lane], ["code", n?.anchor ? fieldText("anchor", n.anchor) : ""]].filter(([, v]) => v).map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("");
+      more = `<div class="prop-d"><dl class="detail">${rows}</dl>${bad ? `<p class="said red">Not in the code: ${esc(bad.detail || bad.status)}</p>` : ""}${why(id) || '<p class="said muted">The proposal gives no reason for this step.</p>'}</div>`;
+    }
+    return `<li><button type="button" class="hop" data-act="prop-node" data-arg="${esc(id)}" aria-expanded="${open}"><i class="fd f-${FAMILY[n?.kind] || ""}"></i><span>${esc(n?.name || id)}</span>${bad ? '<span class="chip-in red">not in the code</span>' : ""}</button>${more}</li>`;
+  };
+  const steps = (title, ids, kind) => (ids.length ? `<section class="hops"><h3>${title}</h3><ul>${ids.map((id) => item(id, kind)).join("")}</ul></section>` : "");
+  const allEdges = new Map([...(cur.edges || []), ...(next.edges || [])].map((e) => [edgeKey(e), e]));
+  const linkText = (k) => { const e = allEdges.get(k); return e ? `${esc(nodeName(e.from, nextNode(e.from) ? next : cur))} → ${esc(nodeName(e.to, nextNode(e.to) ? next : cur))}${e.when ? ` <span class="muted">when ${esc(e.when.decision)} = ${esc(e.when.equals)}</span>` : ""}` : esc(k); };
+  const links = (title, keys) => (keys.length ? `<section class="hops"><h3>${title}</h3><ul class="plain">${keys.map((k) => `<li>${linkText(k)}</li>`).join("")}</ul></section>` : "");
+  const okN = c.anchors.filter((a) => a.status === "ok").length, anchored = c.anchors.filter((a) => a.status !== "unanchored").length;
+  const yes = (ok, good, badText) => (ok ? `<dd>${good}</dd>` : `<dd class="red">${badText}</dd>`);
+  const checks = `<dl class="detail">
+    <dt>the map</dt>${yes(!c.stale, "unchanged since the proposal was made", "changed since the proposal was made")}
+    <dt>the code</dt>${yes(!c.codeMoved.length, "unchanged since the proposal was made", `changed since: ${esc(c.codeMoved.map((k) => k.split(":").slice(1).join(":")).join(", "))}`)}
+    <dt>steps in the code</dt>${yes(!c.bad, anchored ? `${okN} of ${anchored} found` : "no step points at code", `${c.bad} of ${anchored} not found`)}
+  </dl>`;
+  const unsure = d.proposal.unsure.length ? `<section class="hops"><h3>the proposal is not sure about</h3><ul class="plain">${d.proposal.unsure.map((u) => `<li>${esc(u)}</li>`).join("")}</ul></section>` : "";
+  const other = diff.other.length ? `<section class="hops"><h3>also changed</h3><ul class="plain">${diff.other.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></section>` : "";
+  const side = `<aside class="side" aria-label="What this proposal would change"><div class="side-h"><div class="top"><span class="title"><b>What would change</b><span>XPM compared the two maps and checked the new one against the code</span></span></div></div>
+    <div class="side-body">${checks}${steps("steps added", diff.nodes.added, "added")}${steps("steps changed", diff.nodes.changed.map((x) => x.id), "changed")}${steps("steps removed", diff.nodes.removed, "removed")}${links("links added", diff.edges.added)}${links("links changed", diff.edges.changed.map((x) => x.id))}${links("links removed", diff.edges.removed)}${other}${unsure}</div>
+    <div class="side-foot">The list is XPM's own comparison. The reasons under a step are the proposal's words.</div></aside>`;
+  return `<div class="body"><main class="main">${strip}${canvas(next, L, look, edgeLook)}${footer(new Set(["proposed"]), "a proposal · not the map", true)}</main>${side}</div>`;
 }
 
 // The Map says when the code moved on since the map was last marked as checked.
@@ -787,6 +904,7 @@ function syncUrl() {
   const q = new URLSearchParams({ project: S.project || "", pipeline: S.pipelineId || "", view: S.view });
   if (S.view === "draft" && S.draft?.file) q.set("draft", S.draft.file);
   if (S.view === "runs" && S.picked) q.set("run", short(S.picked));
+  if (S.view === "map" && S.proposal) q.set("proposal", S.proposal.jobId);
   history.replaceState(null, "", `?${q}`);
 }
 
@@ -804,6 +922,7 @@ function resetPipeline() {
   S.draft = null; S.draftClosed = false; S.result = null; S.replaying = false; S.replayError = null;
   S.userZoomed = false; S.zoom = null;
   S.multi = false; S.sel = []; S.side = null; S.noteText = ""; S.busy = null; S.writeError = null; S.confirm = null;
+  S.proposal = null;
   if (S.filter === "changed") S.filter = "all";
 }
 
@@ -841,6 +960,9 @@ async function loadPipeline({ quiet = false } = {}) {
     const params = new URLSearchParams(location.search);
     const wantRun = params.get("run");
     if (!quiet && wantRun && !S.picked) { const r = data.runs.find((x) => x.runId.startsWith(wantRun)); if (r) { S.picked = r.runId; S.scrollPicked = true; } }
+    // A link to a proposal opens it, as long as it still waits.
+    const wantProposal = params.get("proposal");
+    if (!quiet && wantProposal && S.view === "map" && !S.proposal && (data.proposals?.waiting || []).some((w) => w.jobId === wantProposal)) setTimeout(() => { if (!S.proposal && req === S.req) openProposal(wantProposal); }, 0);
     const want = params.get("draft");
     if (!quiet && want && S.view === "draft" && !S.draft) { const d = drafts.find((x) => x.file === want); if (d) setTimeout(() => { if (!S.draft && req === S.req) openDraft(d); }, 0); }
   } catch (err) {
@@ -864,7 +986,7 @@ async function loadSource(refresh = false) {
 }
 
 // Writes wait for the server's answer before the page changes. A failure stays on screen, with what was typed.
-async function write(key, url, opts, apply) {
+async function write(key, url, opts, apply, word = "Not saved") {
   if (S.busy) return;
   const req = S.req;
   S.busy = key; S.writeError = null; render();
@@ -872,13 +994,39 @@ async function write(key, url, opts, apply) {
     const out = await getJson(url, opts);
     if (req === S.req) { S.writes += 1; apply(out); }
   } catch (err) {
-    if (req === S.req) S.writeError = { at: key, text: `Not saved: ${err.message}` };
+    if (req === S.req) S.writeError = { at: key, text: `${word}: ${err.message}` };
   } finally {
     if (req === S.req) { S.busy = null; S.confirm = null; render(); }
   }
 }
 const apiBase = () => `/api/project/${encodeURIComponent(S.project)}/pipeline/${encodeURIComponent(S.pipelineId)}`;
 const post = (body) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+async function openProposal(jobId) {
+  const req = S.req;
+  S.proposal = { jobId, data: null, error: null, node: null };
+  S.panelNode = null; S.multi = false; S.sel = []; S.side = null; S.userZoomed = false; S.view = "map";
+  syncUrl(); render();
+  await readProposal(req);
+}
+async function readProposal(req = S.req) {
+  const pr = S.proposal;
+  if (!pr) return;
+  try {
+    const data = await getJson(`${apiBase()}/proposals/${encodeURIComponent(pr.jobId)}`);
+    if (req === S.req && S.proposal === pr) { pr.data = data; pr.error = null; }
+  } catch (err) {
+    if (req === S.req && S.proposal === pr && !pr.data) pr.error = `XPM could not read this proposal: ${err.message}`;
+  }
+  if (req === S.req && S.proposal === pr) render();
+}
+// Accept, discard and undo wait for the server. On a yes the map is read again; on a no the reason stays on screen.
+async function changeMap(key, route, word) {
+  let done = false;
+  await write(key, `${apiBase()}/${route}`, post({}), () => { done = true; }, word);
+  if (done) { S.proposal = null; S.userZoomed = false; syncUrl(); await loadPipeline(); }
+  else if (S.proposal) await readProposal();
+}
 
 function stampMap() {
   write("stamp", `${apiBase()}/stamp`, post({}), (out) => { S.data.since = out.since; if (S.side === "since") S.side = null; });
@@ -952,13 +1100,13 @@ document.addEventListener("click", (ev) => {
   const act = el.dataset.act, arg = el.dataset.arg;
   if (act === "note-text") return;
   // "Are you sure" lasts one tap: anything else takes it back.
-  if (act !== "stamp" && act !== "del-note") S.confirm = null;
+  if (!["stamp", "del-note", "accept", "discard-proposal", "undo"].includes(act)) S.confirm = null;
   if (act !== "menu" && S.menu && !el.closest(".menu")) S.menu = null;
   switch (act) {
     case "menu": S.menu = S.menu === arg ? null : arg; break;
     case "set-project": S.menu = null; loadProject(arg); return;
     case "set-pipeline": S.menu = null; S.pipelineId = arg; resetPipeline(); loadPipeline(); return;
-    case "view": S.view = arg; S.userZoomed = false; if (el.dataset.filter) S.filter = el.dataset.filter; if (arg !== "map") { S.panelNode = null; S.multi = false; S.sel = []; S.side = null; } syncUrl(); break;
+    case "view": S.view = arg; S.userZoomed = false; if (el.dataset.filter) S.filter = el.dataset.filter; if (arg !== "map") { S.panelNode = null; S.multi = false; S.sel = []; S.side = null; S.proposal = null; } syncUrl(); break;
     case "node":
       if (S.view !== "map") break;
       if (S.multi) S.sel = S.sel.includes(arg) ? S.sel.filter((x) => x !== arg) : [...S.sel, arg];
@@ -980,6 +1128,15 @@ document.addEventListener("click", (ev) => {
       if (S.lens === "overview") { for (const id of ids) { const lane = p.nodes.find((x) => x.id === id)?.lane; if (lane) S.openLanes.add(lane); } S.userZoomed = false; }
       break;
     }
+    case "open-proposal": openProposal(arg); return;
+    case "close-proposal": S.proposal = null; S.userZoomed = false; S.writeError = null; syncUrl(); break;
+    case "prop-node": if (S.proposal) S.proposal.node = S.proposal.node === arg ? null : arg; break;
+    case "ask-accept": S.confirm = "accept"; S.writeError = null; break;
+    case "ask-discard": S.confirm = "discard"; S.writeError = null; break;
+    case "ask-undo": S.confirm = "undo"; S.writeError = null; break;
+    case "accept": if (S.proposal) changeMap("accept", `proposals/${encodeURIComponent(S.proposal.jobId)}/accept`, "Not accepted"); return;
+    case "discard-proposal": if (S.proposal) changeMap("discard", `proposals/${encodeURIComponent(S.proposal.jobId)}/discard`, "Not discarded"); return;
+    case "undo": changeMap("undo", "undo", "Not undone"); return;
     case "ask-stamp": S.confirm = "stamp"; S.writeError = null; break;
     case "cancel": S.confirm = null; break;
     case "stamp": stampMap(); return;
@@ -1018,7 +1175,7 @@ document.addEventListener("input", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && (S.menu || S.panelNode || S.multi || S.side || S.confirm)) { S.menu = null; S.panelNode = null; S.multi = false; S.sel = []; S.side = null; S.confirm = null; render(); }
+  if (ev.key === "Escape" && (S.menu || S.panelNode || S.multi || S.side || S.confirm || S.proposal?.node)) { S.menu = null; S.panelNode = null; S.multi = false; S.sel = []; S.side = null; S.confirm = null; if (S.proposal) S.proposal.node = null; render(); }
 });
 
 let resizeTimer;

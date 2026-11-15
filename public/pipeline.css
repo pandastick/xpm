@@ -179,6 +179,15 @@ span.band-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .note-box textarea { width: 100%; min-height: 68px; max-height: 40vh; padding: 8px 10px; background: var(--ground); border: 1px solid var(--card-line); border-radius: var(--r); color: var(--ink); font: inherit; font-size: 16px; line-height: 20px; resize: vertical; }
 .note-box textarea:focus-visible { outline: 1px solid var(--ink); outline-offset: 1px; }
 .since-strip .row > span { line-height: 16px; }
+/* Proposals */
+.prop-strip .row > span { line-height: 16px; }
+.prop-why .row { align-items: baseline; }
+.hop[aria-expanded="true"] { border-color: var(--strong); background: var(--pick); }
+.prop-d { padding: 4px 0 8px; } .prop-d .detail { padding: 6px 10px; }
+.prop-d .was { display: block; color: var(--muted); text-decoration: line-through; } .prop-d .now { display: block; }
+.said { margin: 0; padding: 4px 10px; line-height: 17px; overflow-wrap: anywhere; }
+.hops ul.plain { padding: 0 8px; gap: 6px; line-height: 17px; overflow-wrap: anywhere; }
+.chip-in.red { color: var(--fail); border-color: var(--fail); }
 
 /* Scrubber */
 .scrub { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; background: var(--bar); border-top: 1px solid var(--line); }

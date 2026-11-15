@@ -190,6 +190,23 @@ function traceCallsFor(project, pipeline) {
   return xpm.traceCalls(pipeline, reposFor(project)[profile.truth.repo], profile.traces.calls);
 }
 
+// Proposals: whole new maps waiting for a yes. Accepting writes the map file, so it is off unless this machine's
+// profile for the project says the map may be written here.
+const ACCEPT_OFF = "Accepting is off for this project on this machine: its profile does not say that XPM may write the map file here.";
+function mapWritable(project) {
+  const profile = profileFor(project);
+  return !!profile && profile.map?.writable === true && !xpm.validateProfile(profile).length;
+}
+function proposalsFor(project, pipeline) {
+  try {
+    return { ...xpm.listProposals(STATE_DIR, project, pipeline.id, pipeline, reposFor(project)), canAccept: mapWritable(project), undo: mapWritable(project) ? xpm.undoInfo(STATE_DIR, project, pipeline.id, pipeline) : null };
+  } catch {
+    return { waiting: [], unreadable: 0, canAccept: false, undo: null };
+  }
+}
+// A change to the map file answers in plain words; anything unexpected says only that it failed.
+const changeFailed = (res, err) => res.status(err.status || 500).json({ error: err.status ? err.message : `XPM could not finish this (${err.code || "error"}).` });
+
 // What moved in the code since the map was last marked as checked
 function sinceFor(project, pipeline) {
   const repos = reposFor(project);
@@ -312,6 +329,8 @@ app.get("/api/project/:id/pipeline/:pid", (req, res) => {
     scrubbedDecisions: scrubbed,
     since: sinceFor(req.params.id, pipeline),
     notes: xpm.readNotes(STATE_DIR, req.params.id, pipeline.id),
+    mapSha: xpm.mapSha(pipeline),
+    proposals: proposalsFor(req.params.id, pipeline),
     generatedAt: new Date().toISOString(),
   });
 });
@@ -362,6 +381,58 @@ app.delete("/api/project/:id/pipeline/:pid/notes/:nid", ownPage, (req, res) => {
     return writeFailed(res, err);
   }
   res.json({ notes: xpm.readNotes(STATE_DIR, req.params.id, found.pipeline.id) });
+});
+
+// One proposal: the proposed map, what XPM found when it compared and checked it, and what the proposal says about itself.
+app.param("jid", (req, res, next, id) => (/^[A-Za-z0-9][\w.-]{0,79}$/.test(id) ? next() : res.status(400).json({ error: "Bad proposal id" })));
+app.get("/api/project/:id/pipeline/:pid/proposals/:jid", (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  let proposal;
+  try { proposal = xpm.readProposal(STATE_DIR, req.params.id, found.pipeline.id, req.params.jid); } catch (err) { return changeFailed(res, err); }
+  if (!proposal) return res.status(404).json({ error: "This proposal is not there any more." });
+  const check = xpm.checkProposal(found.pipeline, proposal, reposFor(req.params.id));
+  const { pipeline, basedOnCode, ...about } = proposal;
+  res.json({ proposal: about, pipeline, check: { ...check, why: xpm.whyNot(check) }, canAccept: mapWritable(req.params.id) });
+});
+
+// Accept: the proposal takes the place of the map. Checked again at this moment, written to the map file,
+// the old map kept. Never done by XPM on its own: only this route does it, from XPM's own page.
+app.post("/api/project/:id/pipeline/:pid/proposals/:jid/accept", ownPage, (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  if (!mapWritable(req.params.id)) return res.status(403).json({ error: ACCEPT_OFF });
+  const repos = reposFor(req.params.id);
+  try {
+    xpm.acceptProposal({ dir: STATE_DIR, project: req.params.id, pid: found.pipeline.id, jobId: req.params.jid, manifestFile: manifestPath(req.params.id), repos, by: who(req), codeVersion: versionFor(found.pipeline, repos, profileFor(req.params.id)) });
+  } catch (err) {
+    return changeFailed(res, err);
+  }
+  res.json({ ok: true });
+});
+
+app.post("/api/project/:id/pipeline/:pid/proposals/:jid/discard", ownPage, (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  try {
+    xpm.discardProposal({ dir: STATE_DIR, project: req.params.id, pid: found.pipeline.id, jobId: req.params.jid, by: who(req) });
+  } catch (err) {
+    return err.status ? changeFailed(res, err) : writeFailed(res, err);
+  }
+  res.json({ ok: true });
+});
+
+// Undo the last accept: the map and its check go back to what they were, unless the map was changed since.
+app.post("/api/project/:id/pipeline/:pid/undo", ownPage, (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  if (!mapWritable(req.params.id)) return res.status(403).json({ error: ACCEPT_OFF });
+  try {
+    xpm.undoAccept({ dir: STATE_DIR, project: req.params.id, pid: found.pipeline.id, manifestFile: manifestPath(req.params.id), by: who(req) });
+  } catch (err) {
+    return changeFailed(res, err);
+  }
+  res.json({ ok: true });
 });
 
 // Drafts saved for a pipeline (private folder, examples for the example project)

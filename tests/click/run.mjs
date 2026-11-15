@@ -3,9 +3,12 @@
 // It starts its own XPM on a free port with the example bot plus three small fixtures made on the spot:
 // edge-bot (a run that only just started, an unreadable line, a decision that is not a label),
 // broken-bot (a map the engine refuses), noname-bot (a project without a name), bare-bot (runs with no steps)
-// and moved-bot (a copy of the example code the checks may edit, to see the map notice that the code moved).
+// moved-bot (a copy of the example code the checks may edit, to see the map notice that the code moved),
+// calls-bot (code whose trace calls and map disagree), prop-bot (two proposed maps wait, and XPM may write its map)
+// and locked-bot (a proposed map waits, and XPM may not write its map).
 // SHOTS=/some/folder also saves screenshots there.
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,8 +35,32 @@ variant("calls-bot", (m) => { for (const n of m.pipelines[0].nodes) if (n.anchor
 cpSync(path.join(root, "examples/example-bot"), path.join(tmp, "calls-code"), { recursive: true });
 appendFileSync(path.join(tmp, "calls-code/src/door.js"), 'function audit(u, trace) { trace.node(u.runId, "audit-log"); }\n');
 writeFileSync(path.join(tmp, "calls-code/src/send.js"), "async function sendReply(chat, text) { return { chat, text }; }\nmodule.exports = { sendReply };\n");
-writeFileSync(path.join(tmp, "profiles.json"), JSON.stringify({ "calls-bot": { truth: { repo: "calls" }, traces: { calls: [{ path: "src" }] } } }));
-writeFileSync(path.join(tmp, "repos.json"), JSON.stringify({ moved: path.join(tmp, "code"), calls: path.join(tmp, "calls-code") }));
+// Proposed maps wait for two projects. One profile lets XPM write the map file, the other says nothing about it.
+const xpm = createRequire(import.meta.url)(path.join(root, "lib/pipeline"));
+const propRepos = { prop: path.join(tmp, "prop-code") };
+cpSync(path.join(root, "examples/example-bot"), propRepos.prop, { recursive: true });
+appendFileSync(path.join(propRepos.prop, "src/door.js"), "function auditLog(u) { return u; }\n");
+const propose = (id, jobId, agoMs, change, extra) => {
+  variant(id, (m) => { for (const n of m.pipelines[0].nodes) if (n.anchor) n.anchor.repo = "prop"; });
+  const current = JSON.parse(readFileSync(path.join(tmp, "manifests", `${id}.json`), "utf-8")).pipelines[0];
+  const next = JSON.parse(JSON.stringify(current));
+  change(next);
+  const dir = path.join(tmp, "state/proposals", id, "inbound");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, `${jobId}.json`), JSON.stringify(xpm.makeProposal(current, next, propRepos, { jobId, now: new Date(Date.now() - agoMs), ...extra })));
+};
+const withAudit = (pl) => {
+  pl.nodes.push({ id: "audit", name: "Write the audit line", description: "Notes that a reply went out.", kind: "hook", lane: "after", owner: "example", anchor: { repo: "prop", path: "src/door.js", symbol: "auditLog" } });
+  pl.edges.push({ from: "reply", to: "audit" });
+  pl.nodes.find((n) => n.id === "agent").description = "The main agent reads the message, looks things up and writes the reply.";
+};
+const words = { model: "hand-made", changes: [{ node: "audit", reason: "The door file now has a function that notes each reply.", evidence: [{ file: "src/door.js", lines: "10" }] }, { node: "agent", reason: "The agent also looks things up now." }], unsure: ["Whether the audit line is written before or after the reply is sent."] };
+propose("prop-bot", "job-new", 60000, withAudit, words);
+propose("prop-bot", "job-old", 3600000, (pl) => { pl.nodes.find((n) => n.id === "reply").name = "Send the answer"; });
+propose("locked-bot", "job-locked", 60000, withAudit, words);
+writeFileSync(path.join(tmp, "state/proposals/prop-bot/inbound/job-torn.json"), "{ not a proposal");
+writeFileSync(path.join(tmp, "profiles.json"), JSON.stringify({ "calls-bot": { truth: { repo: "calls" }, traces: { calls: [{ path: "src" }] } }, "prop-bot": { truth: { repo: "prop" }, map: { writable: true } }, "locked-bot": { truth: { repo: "prop" } } }));
+writeFileSync(path.join(tmp, "repos.json"), JSON.stringify({ moved: path.join(tmp, "code"), calls: path.join(tmp, "calls-code"), ...propRepos }));
 const at = (agoMs) => new Date(Date.now() - agoMs).toISOString();
 const line = (runId, agoMs, seq, type, node, metadata = {}) => JSON.stringify({ runId, ts: at(agoMs), seq, pipeline: "inbound", type, ...(node ? { node } : {}), metadata });
 mkdirSync(path.join(tmp, "events/edge-bot"), { recursive: true });
@@ -407,6 +434,67 @@ try {
   await b.go(page("moved-bot", "map"));
   await b.click(q('.node[data-arg="receive"]'));
   check("a project that names no trace calls is told nothing about them", !(await b.text(".main")).includes("trace call") && !(await b.text(".side")).includes("reports to runs"));
+
+  // ---------- a proposed new map: look, accept, undo, discard ----------
+  const flat = async (sel) => (await b.text(sel)).replace(/\s+/g, " ");
+  const propMap = () => JSON.parse(readFileSync(path.join(tmp, "manifests/prop-bot.json"), "utf-8")).pipelines[0];
+  const tall = (sel) => b.ev(`[...document.querySelectorAll(${JSON.stringify(sel)})].every((x) => x.getBoundingClientRect().height >= 42)`);
+  await b.go(page("prop-bot", "map"));
+  check("a waiting proposal is announced on the map with what it would change", (await flat(".prop-strip")).includes("A new version of this map is waiting: 1 step added, 1 step changed, 1 link added.") && (await flat(".prop-strip")).includes("hand-made") && (await flat(".prop-strip")).includes("1 older proposal also waits"));
+  check("a file that is not a proposal is counted, not shown", (await flat(".main")).includes("1 proposal file could not be read as a proposal and is left alone."));
+  check("the map itself is still the old one", (await count('.node[data-arg="audit"]')) === 0);
+  await b.click(q('[data-act="open-proposal"]'), 400);
+  check("Look at it draws the proposed map, the new step marked new and the changed one marked changed", (await b.ev(`${q('.node[data-arg="audit"]')}.classList.contains("draft")`)) && (await flat('.node[data-arg="audit"]')).includes("new") && (await b.ev(`${q('.node[data-arg="agent"]')}.classList.contains("changed")`)) && (await count(".node.draft")) === 1 && (await count(".node.changed")) === 1);
+  check("the proposal is in the address, so the link can be passed on", (await b.ev("location.search")).includes("proposal=job-new"));
+  const sideText = (await flat(".side")).toLowerCase();
+  check("the side lists what would change and what XPM checked", sideText.includes("what would change") && sideText.includes("steps added") && sideText.includes("write the audit line") && sideText.includes("steps changed") && sideText.includes("links added") && sideText.includes("send reply → write the audit line") && sideText.includes("unchanged since the proposal was made") && sideText.includes("10 of 10 found"));
+  check("what the proposal is not sure about is shown", sideText.includes("the proposal is not sure about") && sideText.includes("before or after the reply is sent"));
+  await b.click(q('.node[data-arg="agent"]'));
+  check("tapping a changed step shows before and after, and the proposal's reason", (await flat(".prop-d .was")).includes("reads the message and writes the reply") && (await flat(".prop-d .now")).includes("looks things up") && (await flat(".prop-d")).includes("The agent also looks things up now.") && (await b.ev(`${q('.node[data-arg="agent"]')}.getAttribute("aria-expanded")`)) === "true");
+  await b.click(q('.side .hop[data-arg="audit"]'));
+  check("tapping a new step in the list shows where it is in the code and why", (await flat(".prop-d")).includes("src/door.js · auditLog") && (await flat(".prop-d")).includes("The door file now has a function that notes each reply.") && (await flat(".prop-d")).includes("src/door.js line 10"));
+  await shot("proposal");
+  check("the proposal's controls are tall enough to tap", (await tall(".prop-strip .btn")) && (await tall(".side .hop")));
+  await b.click(q('[data-act="ask-accept"]'));
+  check("Accept asks first and says the old map is kept", (await flat(".prop-strip")).includes("This writes the map file. The map as it is now is kept and can be put back.") && propMap().nodes.length === 9);
+  await b.click(q('[data-act="cancel"]'));
+  check("Cancel leaves the map file alone", (await count('[data-act="accept"]')) === 0 && propMap().nodes.length === 9);
+  await b.click(q('[data-act="ask-accept"]'));
+  await b.click(q('[data-act="accept"]'), 700);
+  check("Yes, accept writes the map file and shows the new map", propMap().nodes.length === 10 && (await count('.node[data-arg="audit"]')) === 1 && (await count(".node.draft")) === 0 && !(await b.ev("location.search")).includes("proposal="));
+  check("the accepted map counts as checked against the code", (await b.text(".status")).includes("code unchanged since"));
+  check("the map says it was updated and offers Undo", (await flat(".main")).includes("from a proposal") && (await flat(".main")).includes("The map as it was is kept.") && (await count('[data-act="ask-undo"]')) === 1);
+  await shot("proposal-accepted");
+  check("the older proposal still waits but can no longer be accepted", (await flat(".main")).includes("It cannot be accepted as it is."));
+  await b.click(q('[data-act="open-proposal"]'), 400);
+  check("a proposal made from an older map says why and has no live Accept", (await flat(".prop-why")).includes("Cannot be accepted.") && (await flat(".prop-why")).includes("map") && (await b.ev(`${q('[data-act="ask-accept"]')}.disabled`)) === true);
+  await shot("proposal-blocked");
+  await b.click(q('[data-act="close-proposal"]'));
+  await b.click(q('[data-act="ask-undo"]'));
+  check("Undo asks first", (await flat(".main")).includes("This puts the map file back as it was before.") && propMap().nodes.length === 10);
+  await b.click(q('[data-act="undo"]'), 700);
+  check("Yes, undo puts the map file back and the proposal waits again", propMap().nodes.length === 9 && (await count('.node[data-arg="audit"]')) === 0 && (await count('[data-act="ask-undo"]')) === 0 && (await flat(".prop-strip")).includes("1 step added, 1 step changed, 1 link added"));
+  await b.click(q('[data-act="open-proposal"]'), 400);
+  await b.click(q('[data-act="ask-discard"]'));
+  check("Discard asks first", (await flat(".prop-strip")).includes("The proposal goes away. The map stays as it is."));
+  await b.click(q('[data-act="discard-proposal"]'), 700);
+  check("Yes, discard takes the proposal away and leaves the map alone", propMap().nodes.length === 9 && !(await flat(".main")).includes("1 step added, 1 step changed") && (await flat(".prop-strip")).includes("A new version of this map is waiting: 1 step changed.") && existsSync(path.join(tmp, "state/proposals/prop-bot/inbound/job-new.json")));
+  await b.go(page("locked-bot", "map"));
+  await b.click(q('[data-act="open-proposal"]'), 400);
+  check("where XPM may not write the map file, Accept is off and says so", (await b.ev(`${q('[data-act="ask-accept"]')}.disabled`)) === true && (await flat(".prop-why")).includes("Accept is off here. Accepting is off for this project on this machine") && (await count('.node[data-arg="audit"]')) === 1);
+  await b.go(page("locked-bot", "map", "&proposal=job-locked"));
+  await sleep(500);
+  check("a link to a proposal opens it", (await count('.node[data-arg="audit"]')) === 1 && (await flat(".side")).includes("What would change"));
+  await b.click(q('[data-act="view"][data-arg="runs"]'), 300);
+  check("leaving for Runs leaves the proposal", (await count(".prop-strip")) === 0 && !(await b.ev("location.search")).includes("proposal="));
+  await b.size(390, 800);
+  await b.go(page("locked-bot", "map"));
+  await b.click(q('[data-act="open-proposal"]'), 400);
+  check("phone: the proposal fits the width and its buttons are tall enough", (await b.ev(`document.documentElement.scrollWidth <= 390 && document.querySelector(".side").getBoundingClientRect().width <= 390`)) && (await tall(".prop-strip .btn")) && (await tall(".side .hop")));
+  await shot("proposal-390");
+  await b.size(1440, 900);
+  await b.go(page("example-bot", "map"));
+  check("a map with no proposal says nothing about proposals", (await count(".prop-strip")) === 0 && !(await flat(".main")).includes("proposal"));
 
   check(`no page errors ${JSON.stringify(b.errors)}`, b.errors.length === 0);
 } catch (err) {
