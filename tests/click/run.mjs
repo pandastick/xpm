@@ -27,7 +27,13 @@ variant("bare-bot", () => {});
 // Its steps point at a copy of the example code under another repo name, so editing a file here touches nothing in the repo.
 variant("moved-bot", (m) => { for (const n of m.pipelines[0].nodes) if (n.anchor) n.anchor.repo = "moved"; });
 cpSync(path.join(root, "examples/example-bot"), path.join(tmp, "code"), { recursive: true });
-writeFileSync(path.join(tmp, "repos.json"), JSON.stringify({ moved: path.join(tmp, "code") }));
+// Its code reports a step the map lacks and stops reporting one the map has, and its profile says where the trace calls are.
+variant("calls-bot", (m) => { for (const n of m.pipelines[0].nodes) if (n.anchor) n.anchor.repo = "calls"; });
+cpSync(path.join(root, "examples/example-bot"), path.join(tmp, "calls-code"), { recursive: true });
+appendFileSync(path.join(tmp, "calls-code/src/door.js"), 'function audit(u, trace) { trace.node(u.runId, "audit-log"); }\n');
+writeFileSync(path.join(tmp, "calls-code/src/send.js"), "async function sendReply(chat, text) { return { chat, text }; }\nmodule.exports = { sendReply };\n");
+writeFileSync(path.join(tmp, "profiles.json"), JSON.stringify({ "calls-bot": { truth: { repo: "calls" }, traces: { calls: [{ path: "src" }] } } }));
+writeFileSync(path.join(tmp, "repos.json"), JSON.stringify({ moved: path.join(tmp, "code"), calls: path.join(tmp, "calls-code") }));
 const at = (agoMs) => new Date(Date.now() - agoMs).toISOString();
 const line = (runId, agoMs, seq, type, node, metadata = {}) => JSON.stringify({ runId, ts: at(agoMs), seq, pipeline: "inbound", type, ...(node ? { node } : {}), metadata });
 mkdirSync(path.join(tmp, "events/edge-bot"), { recursive: true });
@@ -49,7 +55,7 @@ writeFileSync(path.join(tmp, "events/bare-bot", `${at(20000).slice(0, 10)}.jsonl
 
 // ---------- the app and the browser ----------
 const port = await freePort();
-const server = spawn(process.execPath, ["server.js"], { cwd: root, stdio: "ignore", env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", MANIFESTS_DIR: [path.join(root, "manifests"), path.join(tmp, "manifests")].join(path.delimiter), XPM_EVENTS_DIR: path.join(tmp, "events"), XPM_DRAFTS_DIR: path.join(tmp, "drafts"), XPM_STATE_DIR: path.join(tmp, "state"), XPM_REPOS: path.join(tmp, "repos.json"), XPM_PROJECTS: path.join(tmp, "no-profiles.json"), XPM_ALLOWED_LOGINS: "", XPM_ALLOWED_NODES: "", XPM_DENIED_NODES: "", XPM_ALLOWED_HOSTS: "" } });
+const server = spawn(process.execPath, ["server.js"], { cwd: root, stdio: "ignore", env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", MANIFESTS_DIR: [path.join(root, "manifests"), path.join(tmp, "manifests")].join(path.delimiter), XPM_EVENTS_DIR: path.join(tmp, "events"), XPM_DRAFTS_DIR: path.join(tmp, "drafts"), XPM_STATE_DIR: path.join(tmp, "state"), XPM_REPOS: path.join(tmp, "repos.json"), XPM_PROJECTS: path.join(tmp, "profiles.json"), XPM_ALLOWED_LOGINS: "", XPM_ALLOWED_NODES: "", XPM_DENIED_NODES: "", XPM_ALLOWED_HOSTS: "" } });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 40; i++) { try { if ((await fetch(`${base}/api/projects`)).ok) break; } catch { await sleep(150); } }
 const b = await open(bin);
@@ -375,6 +381,32 @@ try {
   check("a map with broken steps cannot be marked as checked", (await b.text(".status")).includes("2 of 9 anchors broken") && (await count('[data-act="ask-stamp"]')) === 0 && (await b.text(".since-strip")).includes("Fix the broken steps"));
   await b.go(page("edge-bot", "map"));
   check("a project whose code is not on this machine is not asked to be checked", (await count(".since-strip")) === 0);
+
+  // ---------- does the code report the steps the map shows? ----------
+  await b.go(page("calls-bot", "map"));
+  const strips = (await b.ev(`[...document.querySelectorAll(".strip")].map((s) => s.innerText.replace(/\\s+/g, " ")).join(" | ")`));
+  check("a step the code reports and the map lacks is named, with its file and line", strips.includes("The code reports 1 step this map does not have: audit-log (src/door.js line 10). A run through it shows as a ghost."));
+  check("steps no trace call names are counted", strips.includes("1 of 9 steps is not named in any trace call in the code, so Runs cannot light it."));
+  await b.click(q('[data-act="side"][data-arg="untraced"]'));
+  check("See it lists the steps the code never reports", (await b.text(".side")).includes("Not reported by the code") && (await b.ev(`[...document.querySelectorAll(".side .hop")].map((h) => h.dataset.arg).join()`)) === "reply" && (await b.ev(`${q('[data-act="side"][data-arg="untraced"]')}.getAttribute("aria-pressed")`)) === "true");
+  await b.click(q('.side .hop[data-arg="reply"]'));
+  check("that step's panel says no trace call names it", (await b.text(".side")).replace(/\s+/g, " ").includes("no trace call names this step, so Runs cannot light it"));
+  await b.click(q('.node[data-arg="receive"]'));
+  check("a reported step's panel says where it is reported", (await b.text(".side")).replace(/\s+/g, " ").includes("in src/door.js, line 3"));
+  await shot("trace-calls");
+  await b.click(q('[data-act="view"][data-arg="runs"]'), 300);
+  check("Runs carries no trace call strips", !(await b.text(".main")).includes("trace call"));
+  await b.size(390, 800);
+  await b.go(page("calls-bot", "map"));
+  await b.click(q('[data-act="side"][data-arg="untraced"]'));
+  check("phone: the trace call strips and the list fit the width", await b.ev(`document.documentElement.scrollWidth <= 390 && document.querySelector(".side").getBoundingClientRect().width <= 390 && [...document.querySelectorAll(".strip .btn")].every((x) => x.getBoundingClientRect().height >= 42)`));
+  await shot("trace-calls-390");
+  await b.size(1440, 900);
+  await b.go(page("example-bot", "map"));
+  check("a map whose every step is reported says nothing about trace calls", !(await b.text(".main")).includes("trace call"));
+  await b.go(page("moved-bot", "map"));
+  await b.click(q('.node[data-arg="receive"]'));
+  check("a project that names no trace calls is told nothing about them", !(await b.text(".main")).includes("trace call") && !(await b.text(".side")).includes("reports to runs"));
 
   check(`no page errors ${JSON.stringify(b.errors)}`, b.errors.length === 0);
 } catch (err) {

@@ -195,6 +195,38 @@ function movedBot() {
   return { dir, env, api: "/api/project/moved-bot/pipeline/inbound", manifest: m };
 }
 
+test("trace calls: the answer says which steps the code reports, only when the profile says where to look", async () => {
+  const f = movedBot();
+  const profiles = path.join(f.dir, "projects.json");
+  // No profile: nothing is claimed either way.
+  const plain = start({ ...f.env, XPM_PROJECTS: profiles });
+  await plain.ready;
+  assert.equal((await get(plain.port, f.api)).json().check.traces, null);
+  plain.child.kill();
+  // The code reports a step the map lacks, and stops reporting one the map has.
+  fs.appendFileSync(path.join(f.dir, "code/src/door.js"), "function audit(u, trace) { trace.node(u.runId, \"audit-log\"); }\n");
+  fs.writeFileSync(path.join(f.dir, "code/src/send.js"), "async function sendReply(chat, text) { return { chat, text }; }\nmodule.exports = { sendReply };\n");
+  fs.writeFileSync(profiles, JSON.stringify({ "moved-bot": { truth: { repo: "moved" }, traces: { calls: [{ path: "src" }] } } }));
+  const s = start({ ...f.env, XPM_PROJECTS: profiles });
+  await s.ready;
+  const t = (await get(s.port, f.api)).json().check.traces;
+  assert.equal(t.traced.length, 8);
+  assert.deepEqual(t.traced.find((c) => c.id === "receive"), { id: "receive", file: "src/door.js", line: 3 });
+  assert.equal(t.unknownCount, 1);
+  assert.equal(t.unknown[0].id, "audit-log");
+  assert.equal(t.unknown[0].file, "src/door.js");
+  assert.deepEqual(t.untraced, ["reply"]);
+  // It does not stop the map being marked as checked: that is about anchors, this is about runs.
+  assert.equal((await get(s.port, `${f.api}/stamp`, { "Sec-Fetch-Site": "same-origin" }, {})).status, 200);
+  s.child.kill();
+  // A profile that points outside the repo is not half used.
+  fs.writeFileSync(profiles, JSON.stringify({ "moved-bot": { truth: { repo: "moved" }, traces: { calls: [{ path: "../elsewhere" }] } } }));
+  const bad = start({ ...f.env, XPM_PROJECTS: profiles });
+  await bad.ready;
+  assert.equal((await get(bad.port, f.api)).json().check.traces, null);
+  bad.child.kill();
+});
+
 test("code moved: a check is kept, a changed file flags its steps, a new check clears them", async () => {
   const f = movedBot();
   const s = start(f.env);

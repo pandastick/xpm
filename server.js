@@ -183,6 +183,13 @@ function versionFor(pipeline, repos, profile) {
   return xpm.codeVersion(repos[repo], profile?.truth?.versionFile);
 }
 
+// Which steps the code reports to the tracer, read from the truth repo. Null when the profile names no trace calls.
+function traceCallsFor(project, pipeline) {
+  const profile = profileFor(project);
+  if (!profile?.traces?.calls || xpm.validateProfile(profile).length) return null;
+  return xpm.traceCalls(pipeline, reposFor(project)[profile.truth.repo], profile.traces.calls);
+}
+
 // What moved in the code since the map was last marked as checked
 function sinceFor(project, pipeline) {
   const repos = reposFor(project);
@@ -298,7 +305,7 @@ app.get("/api/project/:id/pipeline/:pid", (req, res) => {
   const previews = profileFor(req.params.id)?.traces?.previews === true ? xpm.loadPreviews(dir) : new Map();
   res.json({
     pipeline,
-    check: { errors, anchors },
+    check: { errors, anchors, traces: traceCallsFor(req.params.id, pipeline) },
     overlay: xpm.overlay(pipeline, last50),
     runs: last50.map((r) => ({ ...r, preview: previews.get(r.runId) ?? null })),
     rejectedEvents: rejected.length,
