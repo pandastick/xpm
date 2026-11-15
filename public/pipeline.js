@@ -296,9 +296,9 @@ function canvas(p, L, look, edgeLook, extras = "", overlayHtml = "") {
 
 function mapStat(id) {
   const s = S.data?.overlay?.nodes?.[id];
-  if (!S.data?.runs?.length) return ""; // no run recorded yet: "0 hits" on every card says nothing
+  if (!S.data?.overlay?.tracedCount) return ""; // no run recorded a step yet: "0 hits" on every card says nothing
   if (!s || !s.hits) return "0 hits";
-  return `${s.hits} hits${s.medianMs != null ? ` · ${ms(s.medianMs)}` : ""}`;
+  return `${s.hits} ${s.hits === 1 ? "hit" : "hits"}${s.medianMs != null ? ` · ${ms(s.medianMs)}` : ""}`;
 }
 
 function liveAt() {
@@ -360,11 +360,14 @@ function viewMap() {
   const note = `hits and median time · last ${S.data.runs.length} runs · updated ${agoWords(S.fetchedAt)}`;
   const strip = setupStrips() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
   if (ghosts.length) states.add("ghost");
+  // Runs that carry no steps: say it once, or the map looks broken.
+  const bare = S.data.runs.length - (S.data.overlay.tracedCount || 0);
+  const blind = bare ? `<div class="strip quiet"><div class="row"><span class="muted">${S.data.overlay.tracedCount ? `${bare} of the last ${S.data.runs.length} runs` : S.data.runs.length === 1 ? "The one run on record" : `All ${S.data.runs.length} runs on record`} recorded only a start and an end, no steps. ${S.data.overlay.tracedCount ? "They are not counted in the hits." : "So the map has no hits or timings yet: the product does not report its steps."}</span></div></div>` : "";
   // Events the reader refused or cleaned: said once, quietly, so a writer that sends too much gets noticed.
   const rej = S.data.rejectedEvents || 0, scr = S.data.scrubbedDecisions || 0;
   const cleaned = rej || scr ? `<div class="strip quiet"><div class="row"><span class="muted">${[rej ? `${rej} ${rej === 1 ? "event line was" : "event lines were"} unreadable and skipped` : "", scr ? `${scr} decision ${scr === 1 ? "value was" : "values were"} not a known label and ${scr === 1 ? "was" : "were"} replaced` : ""].filter(Boolean).join(" · ")}. See "Events" in the README.</span></div></div>` : "";
   const lens = (full.lanes || []).length > 1 ? `<div class="seg" role="group" aria-label="Lens"><button type="button" aria-pressed="${S.lens === "overview"}" data-act="lens" data-arg="overview">Overview</button><button type="button" aria-pressed="${S.lens === "all"}" data-act="lens" data-arg="all">All steps</button></div>` : "";
-  return `<div class="body"><main class="main">${strip}${cleaned}${body}${footer(states, note, true, lens)}</main>${S.panelNode ? nodePanel(S.panelNode) : ""}</div>`;
+  return `<div class="body"><main class="main">${strip}${blind}${cleaned}${body}${footer(states, note, true, lens)}</main>${S.panelNode ? nodePanel(S.panelNode) : ""}</div>`;
 }
 
 function nodePanel(id) {
@@ -465,11 +468,12 @@ function viewRuns() {
   const failIdx = Object.keys(run.errors).length ? run.path.indexOf(Object.keys(run.errors)[0]) : -1;
   const channel = p.channel ? ` via ${esc(p.channel)}` : "";
   const none = !run.path.length;
-  const tail = run.status === "failed" ? (none ? "failed before its first step" : `failed at step ${failIdx >= 0 ? failIdx + 1 : run.path.length}`) : run.status === "running" ? (none ? "running, not at a step yet" : `running, step ${run.path.length}`) : `${run.path.length} steps`;
+  const tail = run.status === "failed" ? (none ? "failed before its first step" : `failed at step ${failIdx >= 0 ? failIdx + 1 : run.path.length}`) : run.status === "running" ? (none ? "running, not at a step yet" : `running, step ${run.path.length}`) : none ? "no steps recorded" : `${run.path.length} steps`;
   const dot = run.status === "failed" ? '<span class="dot fail"></span>' : run.status === "running" ? '<span class="dot live"></span>' : '<span class="dot done"></span>';
   const ghostBtn = ghostIds.length ? `<button type="button" class="btn" data-act="ghost-draft" data-arg="${esc(ghostIds[0])}">Add ${esc(ghostIds[0])} to a draft</button>` : "";
   const strip = `<div class="strip"><div class="row">${dot}<span style="font-weight:600">${run.preview ? `“${esc(run.preview)}”` : '<span class="muted">(no preview)</span>'}</span>
     <span class="muted">${run.sentAt ? `sent ${esc(clock(run.sentAt))}${channel} · ` : ""}run ${esc(short(run.runId))} · ${tail} · ${ms(total)}</span></div>
+    ${none && run.status !== "running" && run.status !== "failed" ? `<span class="muted">This run recorded only its start and its end, so there is no path to light.</span>` : ""}
     ${gone ? `<span class="muted">The run you picked is no longer in the last ${runs.length}. This is the newest.</span>` : ""}
     <div class="row">${ghostBtn}${showRail}</div></div>`;
 

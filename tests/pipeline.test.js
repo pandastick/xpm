@@ -60,6 +60,18 @@ test("overlay: hits, failures, ghosts and unmapped hops", () => {
   assert.ok(o.unmapped.some((u) => u.pair === "fast-path->history-log"));
 });
 
+test("overlay: runs that recorded no step do not count as hits and do not turn the map cold", () => {
+  const bare = (id) => ({ runId: id, startedAt: "2026-11-01T10:00:00Z", endedAt: "2026-11-01T10:00:01Z", status: "success", path: [], decisions: {}, durations: {}, errors: {} });
+  const none = xpm.overlay(pipeline, [bare("a"), bare("b")], { now: NOW });
+  assert.equal(none.runCount, 2);
+  assert.equal(none.tracedCount, 0);
+  assert.ok(Object.values(none.nodes).every((n) => n.state === "idle" && n.hits === 0));
+  const mixed = xpm.overlay(pipeline, [...runs, bare("a")], { now: NOW });
+  assert.equal(mixed.tracedCount, 60);
+  assert.equal(mixed.nodes.receive.hits, 60);
+  assert.deepEqual(mixed.edgeShare, xpm.overlay(pipeline, runs, { now: NOW }).edgeShare);
+});
+
 test("overlay: a node nobody reached in 14 days goes cold", () => {
   const later = Date.parse("2026-12-01T00:00:00Z");
   assert.equal(xpm.overlay(pipeline, runs, { now: later }).nodes.receive.state, "cold");
