@@ -43,6 +43,8 @@ function manifestFiles() {
 // Private execution events and drafts live outside git (see .gitignore). Examples ship under examples/.
 const EVENTS_DIR = process.env.XPM_EVENTS_DIR || path.join(__dirname, "events");
 const DRAFTS_DIR = process.env.XPM_DRAFTS_DIR || path.join(__dirname, "drafts");
+// What XPM writes itself: stamps and notes. Beside the drafts folder unless XPM_STATE_DIR says otherwise.
+const STATE_DIR = process.env.XPM_STATE_DIR || path.join(path.dirname(DRAFTS_DIR), "state");
 const REPOS_FILE = process.env.XPM_REPOS || path.join(__dirname, ".xpm-repos.json");
 // Per project: where the code really lives (truth), what to compare it with (mirror), and how XPM is set up for it.
 const PROFILES_FILE = process.env.XPM_PROJECTS || path.join(__dirname, ".xpm-projects.json");
@@ -154,6 +156,46 @@ function reposFor(project) {
   return { ...example, ...xpm.loadRepos(REPOS_FILE) };
 }
 
+// Writes are taken only from XPM's own page: another site, or another service on the same host name, is refused.
+function ownPage(req, res, next) {
+  const no = () => res.status(403).json({ error: "Writes are only taken from XPM's own page." });
+  // The browser sets Sec-Fetch-Site itself and a page cannot fake it. Older browsers send only Origin.
+  const site = req.get("Sec-Fetch-Site");
+  if (site && site !== "same-origin" && site !== "none") return no();
+  const origin = req.get("Origin");
+  if (origin && site !== "same-origin") {
+    let host = null;
+    try { host = new URL(origin).host; } catch { host = null; }
+    if (host !== String(req.headers.host || "").toLowerCase()) return no();
+  }
+  if (req.method === "POST" && !req.is("application/json")) return res.status(415).json({ error: "Send JSON." });
+  next();
+}
+// The login is only known, and only trusted, when the login gate is on.
+const who = (req) => (ALLOWED_LOGINS.length ? String(req.get("Tailscale-User-Login") || "").toLowerCase().slice(0, 80) : "");
+// A write that fails says so in plain words, without the folder's full path.
+const writeFailed = (res, err) => res.status(err.status || 500).json({ error: err.status ? err.message : `XPM could not write to its state folder (${err.code || "error"}). Check XPM_STATE_DIR on the machine XPM runs on.` });
+
+// The version the code gives itself, read from the truth repo. With no profile: from the one repo every step points at.
+function versionFor(pipeline, repos, profile) {
+  const used = [...new Set((pipeline.nodes || []).map((n) => n.anchor?.repo).filter(Boolean))];
+  const repo = profile?.truth?.repo || (used.length === 1 ? used[0] : null);
+  return xpm.codeVersion(repos[repo], profile?.truth?.versionFile);
+}
+
+// What moved in the code since the map was last marked as checked
+function sinceFor(project, pipeline) {
+  const repos = reposFor(project);
+  const profile = profileFor(project);
+  const stamp = xpm.readStamp(STATE_DIR, project, pipeline.id);
+  const diff = stamp ? xpm.compareStamp(pipeline, repos, stamp) : { changed: [], uncovered: [], files: [] };
+  return {
+    stamp: stamp ? { takenAt: stamp.takenAt, by: stamp.by || "", how: stamp.how || "", codeVersion: stamp.codeVersion || null } : null,
+    codeVersion: versionFor(pipeline, repos, profile),
+    ...diff,
+  };
+}
+
 // List all available project manifests
 app.get("/api/projects", (req, res) => {
   const files = manifestFiles();
@@ -261,8 +303,58 @@ app.get("/api/project/:id/pipeline/:pid", (req, res) => {
     runs: last50.map((r) => ({ ...r, preview: previews.get(r.runId) ?? null })),
     rejectedEvents: rejected.length,
     scrubbedDecisions: scrubbed,
+    since: sinceFor(req.params.id, pipeline),
+    notes: xpm.readNotes(STATE_DIR, req.params.id, pipeline.id),
     generatedAt: new Date().toISOString(),
   });
+});
+
+// "The map matches the code as it is now": keeps a fingerprint of every file the steps point at.
+// Refused while any step does not match the code, because then the map plainly does not match.
+app.post("/api/project/:id/pipeline/:pid/stamp", ownPage, (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  const { pipeline } = found;
+  if (xpm.validatePipeline(pipeline).length) return res.status(409).json({ error: "This map has errors. Fix them first." });
+  const anchors = xpm.checkAnchors(pipeline, reposFor(req.params.id));
+  const bad = anchors.filter((a) => xpm.BAD.has(a.status)).length;
+  if (bad) return res.status(409).json({ error: `${bad} of ${anchors.length} steps do not match the code. Fix the map first.` });
+  if (!anchors.some((a) => a.status === "ok")) return res.status(409).json({ error: "No step on this map points at code, so there is nothing to check it against." });
+  const profile = profileFor(req.params.id);
+  const repos = reposFor(req.params.id);
+  try {
+    xpm.writeStamp(STATE_DIR, req.params.id, pipeline.id, xpm.takeStamp(pipeline, repos, { by: who(req), how: "by hand", codeVersion: versionFor(pipeline, repos, profile) }));
+  } catch (err) {
+    return writeFailed(res, err);
+  }
+  res.json({ since: sinceFor(req.params.id, pipeline) });
+});
+
+// Notes on steps: what someone wants to remember, ask or change. Kept in XPM's state folder, never in the project.
+app.post("/api/project/:id/pipeline/:pid/notes", ownPage, (req, res) => {
+  const found = findPipeline(req, res);
+  if (!found) return;
+  const { pipeline } = found;
+  const errors = [...xpm.validatePipeline(pipeline).slice(0, 1).map(() => "This map has errors. Fix them first."), ...xpm.validateNote(pipeline, req.body)];
+  if (errors.length) return res.status(400).json({ error: errors.join("; ") });
+  try {
+    xpm.addNote(STATE_DIR, req.params.id, pipeline.id, { nodes: req.body.nodes, text: req.body.text, by: who(req) });
+  } catch (err) {
+    return writeFailed(res, err);
+  }
+  res.json({ notes: xpm.readNotes(STATE_DIR, req.params.id, pipeline.id) });
+});
+
+app.delete("/api/project/:id/pipeline/:pid/notes/:nid", ownPage, (req, res) => {
+  if (!/^[0-9a-f]{12}$/.test(req.params.nid)) return res.status(400).json({ error: "Bad note id" });
+  const found = findPipeline(req, res);
+  if (!found) return;
+  try {
+    xpm.removeNote(STATE_DIR, req.params.id, found.pipeline.id, req.params.nid);
+  } catch (err) {
+    return writeFailed(res, err);
+  }
+  res.json({ notes: xpm.readNotes(STATE_DIR, req.params.id, found.pipeline.id) });
 });
 
 // Drafts saved for a pipeline (private folder, examples for the example project)

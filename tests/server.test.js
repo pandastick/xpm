@@ -9,9 +9,14 @@ const http = require("node:http");
 const ROOT = path.join(__dirname, "..");
 let nextPort = 4100 + Math.floor(Math.random() * 400);
 
+// A failed check must not leave its server running: the test run would wait for it forever.
+const started = [];
+test.after(() => { for (const child of started) child.kill(); });
+
 function start(env) {
   const port = nextPort++;
   const child = spawn(process.execPath, ["server.js"], { cwd: ROOT, env: { ...process.env, PORT: String(port), ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  started.push(child);
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (out += d));
@@ -22,9 +27,9 @@ function start(env) {
 }
 
 // fetch cannot set Host, and the host check is about exactly that header.
-function get(port, urlPath, headers = {}, body) {
+function get(port, urlPath, headers = {}, body, method) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path: urlPath, method: body ? "POST" : "GET", headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...headers } }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path: urlPath, method: method || (body ? "POST" : "GET"), headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...headers } }, (res) => {
       let text = "";
       res.on("data", (d) => (text += d));
       res.on("end", () => resolve({ status: res.statusCode, text, json: () => JSON.parse(text) }));
@@ -173,5 +178,140 @@ test("simulate: the answer and the spec hold no typed text, and a bad draft or m
     assert.equal(map.json().overlay, null);
     assert.equal((await get(s.port, `/api/project/broken/pipeline/${pid}/simulate`, {}, {})).status, 400);
   }
+  s.child.kill();
+});
+
+// A copy of the example bot that the test may edit, mapped under its own repo name.
+function movedBot() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xpm-moved-"));
+  fs.cpSync(path.join(ROOT, "examples/example-bot"), path.join(dir, "code"), { recursive: true });
+  const m = JSON.parse(fs.readFileSync(path.join(ROOT, "manifests/example-bot.json"), "utf-8"));
+  m.id = "moved-bot";
+  for (const p of m.pipelines) for (const n of p.nodes) if (n.anchor) n.anchor.repo = "moved";
+  fs.mkdirSync(path.join(dir, "manifests"));
+  fs.writeFileSync(path.join(dir, "manifests/moved-bot.json"), JSON.stringify(m));
+  fs.writeFileSync(path.join(dir, "repos.json"), JSON.stringify({ moved: path.join(dir, "code") }));
+  const env = { MANIFESTS_DIR: path.join(dir, "manifests"), XPM_REPOS: path.join(dir, "repos.json"), XPM_STATE_DIR: path.join(dir, "state"), XPM_DRAFTS_DIR: path.join(dir, "drafts"), XPM_EVENTS_DIR: path.join(dir, "events") };
+  return { dir, env, api: "/api/project/moved-bot/pipeline/inbound", manifest: m };
+}
+
+test("code moved: a check is kept, a changed file flags its steps, a new check clears them", async () => {
+  const f = movedBot();
+  const s = start(f.env);
+  await s.ready;
+  const before = (await get(s.port, f.api)).json();
+  assert.deepEqual(before.since, { stamp: null, codeVersion: "1.4.0", changed: [], uncovered: [], files: [] });
+  assert.deepEqual(before.notes, []);
+
+  const marked = await get(s.port, `${f.api}/stamp`, {}, {});
+  assert.equal(marked.status, 200);
+  assert.equal(marked.json().since.stamp.how, "by hand");
+  assert.equal(marked.json().since.stamp.codeVersion, "1.4.0");
+  assert.equal(marked.json().since.stamp.by, "");
+  assert.ok(fs.existsSync(path.join(f.dir, "state/stamps/moved-bot/inbound.json")));
+
+  fs.appendFileSync(path.join(f.dir, "code/src/agent.js"), "// a later edit\n");
+  fs.writeFileSync(path.join(f.dir, "code/VERSION"), "1.5.0\n");
+  const after = (await get(s.port, f.api)).json().since;
+  assert.deepEqual(after.changed.sort(), ["agent", "private-model"]);
+  assert.equal(after.files.length, 1);
+  assert.equal(after.files[0].file, "moved:src/agent.js");
+  assert.equal(after.stamp.codeVersion, "1.4.0");
+  assert.equal(after.codeVersion, "1.5.0");
+  assert.ok(!JSON.stringify(after).includes(f.dir), "no folder path of this machine in the answer");
+
+  const again = (await get(s.port, `${f.api}/stamp`, {}, {})).json().since;
+  assert.deepEqual(again.changed, []);
+  assert.equal(again.stamp.codeVersion, "1.5.0");
+  s.child.kill();
+});
+
+test("code moved: a map that does not match the code cannot be marked as checked", async () => {
+  const f = movedBot();
+  fs.rmSync(path.join(f.dir, "code/src/agent.js"));
+  const s = start(f.env);
+  await s.ready;
+  const res = await get(s.port, `${f.api}/stamp`, {}, {});
+  assert.equal(res.status, 409);
+  assert.match(res.json().error, /2 of 9 steps do not match the code/);
+  assert.ok(!fs.existsSync(path.join(f.dir, "state")));
+  assert.equal((await get(s.port, "/api/project/moved-bot/pipeline/nope/stamp", {}, {})).status, 404);
+  s.child.kill();
+});
+
+test("notes: saved on steps of the map, listed newest first, deleted by id", async () => {
+  const f = movedBot();
+  const s = start(f.env);
+  await s.ready;
+  // With no login gate the header could be anyone's word, so no name is kept.
+  const one = await get(s.port, `${f.api}/notes`, { "Tailscale-User-Login": "someone@example.com" }, { nodes: ["agent"], text: "why here?" });
+  assert.equal(one.status, 200);
+  assert.equal(one.json().notes[0].by, "");
+  const two = (await get(s.port, `${f.api}/notes`, {}, { nodes: ["agent", "reply"], text: "merge these" })).json().notes;
+  assert.deepEqual(two.map((n) => n.text), ["merge these", "why here?"]);
+  assert.deepEqual(two[0].nodes, ["agent", "reply"]);
+  assert.deepEqual((await get(s.port, f.api)).json().notes.map((n) => n.text), ["merge these", "why here?"]);
+
+  const bad = await get(s.port, `${f.api}/notes`, {}, { nodes: ["not-a-step"], text: "x" });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json().error, /steps on this map/);
+  assert.equal((await get(s.port, `${f.api}/notes`, {}, { nodes: ["agent"], text: "   " })).status, 400);
+  assert.equal((await get(s.port, `${f.api}/notes`, {}, { nodes: ["agent"], text: "x".repeat(2001) })).status, 400);
+
+  assert.equal((await get(s.port, `${f.api}/notes/not-an-id`, {}, undefined, "DELETE")).status, 400);
+  const left = await get(s.port, `${f.api}/notes/${two[0].id}`, {}, undefined, "DELETE");
+  assert.equal(left.status, 200);
+  assert.deepEqual(left.json().notes.map((n) => n.text), ["why here?"]);
+  assert.equal(fs.statSync(path.join(f.dir, "state/notes/moved-bot.json")).mode & 0o777, 0o600);
+  s.child.kill();
+});
+
+test("writes are taken only from the page itself, and only as JSON", async () => {
+  const f = movedBot();
+  const s = start(f.env);
+  await s.ready;
+  const note = { nodes: ["agent"], text: "x" };
+  const host = `127.0.0.1:${s.port}`;
+  const refused = [
+    { Origin: "https://elsewhere.example" },
+    { Origin: `http://127.0.0.1:${s.port + 1}` },
+    { Origin: "null" },
+    { "Sec-Fetch-Site": "cross-site" },
+    { "Sec-Fetch-Site": "same-site", Origin: `http://${host}` },
+  ];
+  for (const headers of refused) {
+    const res = await get(s.port, `${f.api}/notes`, headers, note);
+    assert.equal(res.status, 403, JSON.stringify(headers));
+    assert.match(res.json().error, /own page/);
+    assert.equal((await get(s.port, `${f.api}/stamp`, headers, {})).status, 403);
+    assert.equal((await get(s.port, `${f.api}/notes/0123456789ab`, headers, undefined, "DELETE")).status, 403);
+  }
+  assert.equal((await get(s.port, `${f.api}/notes`, { "Content-Type": "text/plain" }, note)).status, 415);
+  assert.ok(!fs.existsSync(path.join(f.dir, "state")), "a refused write leaves nothing on disk");
+  // The page itself: the browser says same-origin, or an older one sends an Origin that is this host.
+  assert.equal((await get(s.port, `${f.api}/notes`, { Origin: `http://${host}` }, note)).status, 200);
+  assert.equal((await get(s.port, `${f.api}/notes`, { "Sec-Fetch-Site": "same-origin", Origin: "https://the-name-a-proxy-shows.example" }, note)).status, 200);
+  s.child.kill();
+});
+
+test("writes carry the login only when the login gate is on, and a state folder that cannot be written says so", async () => {
+  const f = movedBot();
+  const gated = start({ ...f.env, XPM_ALLOWED_LOGINS: "owner@example.com" });
+  await gated.ready;
+  const who = { "Tailscale-User-Login": "Owner@Example.com" };
+  assert.equal((await get(gated.port, `${f.api}/notes`, who, { nodes: ["agent"], text: "mine" })).json().notes[0].by, "owner@example.com");
+  assert.equal((await get(gated.port, `${f.api}/stamp`, who, {})).json().since.stamp.by, "owner@example.com");
+  assert.equal((await get(gated.port, `${f.api}/notes`, {}, { nodes: ["agent"], text: "no login" })).status, 403);
+  gated.child.kill();
+
+  const blocked = path.join(f.dir, "a-file");
+  fs.writeFileSync(blocked, "not a folder");
+  const s = start({ ...f.env, XPM_STATE_DIR: blocked });
+  await s.ready;
+  const res = await get(s.port, `${f.api}/notes`, { "Tailscale-User-Login": "someone@example.com" }, { nodes: ["agent"], text: "x" });
+  assert.equal(res.status, 500);
+  assert.match(res.json().error, /could not write to its state folder/);
+  assert.ok(!res.text.includes(f.dir));
+  assert.equal((await get(s.port, f.api)).json().notes.length, 0);
   s.child.kill();
 });

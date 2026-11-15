@@ -13,6 +13,7 @@ manifests/*.json
 # XPM private runtime data: real execution events, drafts, and the local repo map for `xpm check`.
 /events/
 /drafts/
+/state/
 /.xpm-repos.json
 /.xpm-projects.json
 __pycache__/

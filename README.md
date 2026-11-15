@@ -104,9 +104,25 @@ Open `http://localhost:3333/pipeline.html` (or the **Pipeline** button on a proj
 
 A long pipeline does not become one strip: when the lanes side by side would be much wider than the window, they wrap into rows like words in a paragraph (short lanes share a row), and the lines between rows run in the gaps, never through a card. The **Overview** lens folds each lane into one card; open the lane you want to read. A map the engine refuses is shown as its list of problems, not as a half-drawn canvas.
 
-Colour means two things only. What a step is for: teal for in and out (door, sender), amber for a decision (gate, mode, router, classifier), violet for an AI model, grey for an action (tool, hook), pink for storage (store, queue). And its state: red failing, green live, dashed blue draft, dashed red ghost. The key at the bottom names the families on the map; tap one to single it out. The icon and the kind word say the same thing, so nothing depends on colour alone. Lines carry arrowheads, a line out of a decision reads only the answer (`no`, `yes`), the first step is marked `start` and a step nothing follows `end`, and lanes are numbered in reading order.
+Colour means two things only. What a step is for: teal for in and out (door, sender), amber for a decision (gate, mode, router, classifier), violet for an AI model, grey for an action (tool, hook), pink for storage (store, queue). And its state: red failing, green live, dashed blue draft, dashed red ghost, and a solid blue tag where the code changed since the map was checked. The key at the bottom names the families on the map; tap one to single it out. The icon and the kind word say the same thing, so nothing depends on colour alone. Lines carry arrowheads, a line out of a decision reads only the answer (`no`, `yes`), the first step is marked `start` and a step nothing follows `end`, and lanes are numbered in reading order.
 
 Plain JavaScript, no build step, no new dependencies. Every control is a real button at least 44px tall, scrolling is native, and the page has no touch handlers (safe for Apple Pencil on iPad). On a phone the runs list stacks under the canvas and one picker holds project and pipeline.
+
+### Has the code moved since the map was checked?
+
+A map is true on the day someone checks it. After that the code moves on. XPM tells you when, exactly, and never guesses what the change means.
+
+- **Mark as checked** (on the Map, asked twice) records a fingerprint of every file a step points at, with the time, who pressed it (only when the login gate is on) and the version the code gives itself. It is refused while any step does not match the code.
+- From then on XPM compares those fingerprints with the files on every load. When a file differs, the Map says **Code moved**, the status reads `2 steps behind the code`, each step in a changed file carries a blue **code changed** tag (a folded lane counts them), and **See what changed** lists the files with the steps in them.
+- The comparison is by file, so a changed file flags every step in it: it says where to look, not which step changed. A step added to the map, or pointed at another file, after the check is listed as not covered. A file that was only touched, with the same content, is not a change.
+- The version label is optional. XPM reads `package.json` (`version`), then the first version-like word in `VERSION`, in the truth repo; `truth.versionFile` in the source profile names another file. With no version the strip speaks in dates.
+- Fix the map where it is wrong, then mark it as checked again. Nothing here edits the map for you.
+
+### Notes on steps
+
+Tap a step and write a note in its panel: a question, something to change, something to remember. **Select more steps** turns taps into picks, so one note can be about several steps at once. A step with notes shows a count; **Notes** in the footer lists them all, newest first, and **Show the steps** picks a note's steps on the map. Delete asks for a second tap.
+
+Stamps and notes are the only things the page writes. They live in XPM's own state folder (`state/` beside `drafts/`, or `XPM_STATE_DIR`), as small JSON files only the user running XPM can read: `stamps/<project>/<pipeline>.json` and `notes/<project>.json`. Never in the project, never in git. A note holds 2000 characters at most, a project 500 notes. Writes are taken only from XPM's own page (the browser's `Sec-Fetch-Site`, or an `Origin` equal to the host it is served under) and only as JSON, so another site open in the same browser cannot write here.
 
 ### Try it
 
@@ -156,7 +172,7 @@ The example bot, its code and its events are synthetic.
 - Use one tracer per pipeline per process: the step counter (`seq`) lives in the tracer.
 - `sentAt` is when the channel received the message (Unix seconds), shown in local time in Runs.
 - Drop-in writers with no dependencies: `writers/xpm-trace.js` (Node, TypeScript) and `writers/xpm_trace.py` (Python). `runIdFor(updateId, salt)` hashes the upstream id.
-- Real events go in `events/<project>/YYYY-MM-DD.jsonl` (or `XPM_EVENTS_DIR`), drafts in `drafts/<project>/` (or `XPM_DRAFTS_DIR`). Both are git-ignored.
+- Real events go in `events/<project>/YYYY-MM-DD.jsonl` (or `XPM_EVENTS_DIR`), drafts in `drafts/<project>/` (or `XPM_DRAFTS_DIR`), checks and notes in `state/` (or `XPM_STATE_DIR`). All three are git-ignored.
 
 ### Previews: what was typed (opt-in, kept apart)
 
@@ -189,11 +205,12 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | Setting | Meaning |
 |---|---|
 | `truth.repo` | The repo name the map's anchors use, mapped to a folder in `.xpm-repos.json`. `xpm check` and the anchor status read this folder. |
+| `truth.versionFile` | Optional. A file inside the truth repo that holds the version the code gives itself, for example `VERSION` or `app/package.json`. Without it XPM tries `package.json`, then `VERSION`. |
 | `mirror` | Optional. A git checkout (repo name or absolute path) and a ref to compare the truth with, file by file over `paths` (`prefix` when the mirror keeps them in a subfolder). XPM reports the drift; it never enforces it. `fetch: true` lets XPM run `git fetch` first. `ignore` lists files to leave out on both sides (`"*.service"` matches a file name anywhere, `"deploy/*.sh"` a path). Folders with `backup` in their name are always left out. |
 | `runsOn` | The machine where the truth and the traces are readable. On any other machine Setup says so. |
 | `traces` | Who writes them, whether previews of typed text are on, and what is never previewed. The events folder itself is `XPM_EVENTS_DIR/<project>`. Previews are shown only when `previews` is `true` here, whatever is on disk. |
 | `access` | A label. The real gate is `XPM_ALLOWED_LOGINS` or `XPM_ALLOWED_NODES`. A project with no gate that is reachable from other devices is flagged in Setup, previews or not (unless `public: true`, for synthetic data). |
-| `mapOwner`, `confirmed` | Who confirms the map against the truth, and when they last did. |
+| `mapOwner`, `confirmed` | Who confirms the map against the truth, and when they last did, written by hand. **Mark as checked** on the Map is the live form of this: it also notices when the code moves on. |
 
 ### Serving it on a tailnet
 
@@ -202,6 +219,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 - `XPM_ALLOWED_LOGINS` (comma separated, for example `you@example.com`): behind `tailscale serve`, only these Tailscale logins get in; everyone else, and tagged devices (which send no login), get 403.
 - `XPM_ALLOWED_NODES` and `XPM_DENIED_NODES` (comma separated device names, for example `my-laptop,my-phone`): one login can own many devices, and these let in or keep out single ones. XPM takes the caller's tailnet address from the last entry of `X-Forwarded-For` (set by `tailscale serve`) and asks `tailscale whois` which device it is. A denied device gets 403; with an allowed list, only listed devices get in. No address, or no answer from tailscale, also means 403. `XPM_TAILSCALE_BIN` names the binary when it is not on the path.
 - XPM refuses to start with a login or device list unless `HOST` is loopback, because the proxy's headers could otherwise be forged. Set a gate before turning on previews.
+- `XPM_STATE_DIR`: where **Mark as checked** and notes are kept. The user XPM runs as must be able to write there (under systemd with a read-only home, add it to `ReadWritePaths`). Everyone who can open XPM can write notes and mark a map as checked, so the gates above are also the gate for writing.
 
 ### API
 
@@ -210,6 +228,11 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | `GET /api/project/:id/pipeline/:pid` | map, code check, overlay, last 50 runs |
 | `GET /api/project/:id/pipeline/:pid/drafts` | saved drafts |
 | `POST /api/project/:id/pipeline/:pid/simulate` | what-if result and change spec for the draft in the body |
+| `POST /api/project/:id/pipeline/:pid/stamp` | marks the map as checked against the code as it is now; `409` when a step does not match the code |
+| `POST /api/project/:id/pipeline/:pid/notes` | saves a note `{ nodes: [step ids], text }`; returns the notes |
+| `DELETE /api/project/:id/pipeline/:pid/notes/:noteId` | deletes one note; returns the notes |
+
+The pipeline answer also carries `since` (the last check, the code version, the steps and files that changed) and `notes`. The three writing routes are the only ones that write, and only into the state folder.
 
 ### Credits
 
@@ -392,6 +415,7 @@ xpm/
     pipeline.html     Pipeline view: Map, Runs, Draft
     pipeline.js       The view (state, rendering, actions)
     pipeline-layout.js  Where every card and line goes (pure, tested in Node)
+    pipeline.css      The pipeline view's styles
     style.css         Dark theme styling
   tests/              node --test; tests/click/ drives a real browser
   extras/

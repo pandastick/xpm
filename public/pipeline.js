@@ -32,6 +32,9 @@ const S = {
   source: null, showFiles: false,     // Setup: where the code lives and how XPM is set up for this project
   req: 0,                             // goes up with every project or pipeline switch; an answer to an older request is ignored
   draftClosed: false, scrollPicked: false,
+  multi: false, sel: [],              // Map: several steps picked at once, to write one note about them
+  side: null,                         // Map: "since" lists what changed in the code, "notes" lists every note
+  noteText: "", busy: null, writeError: null, confirm: null, writes: 0,
 };
 
 // ---------- helpers ----------
@@ -51,6 +54,8 @@ const SVG = {
   up: '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10l4-4 4 4"></path></svg>',
   open: '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"></path></svg>',
   down: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M4.5 7.5L8 11l3.5-3.5M3 13.5h10"></path></svg>',
+  note: '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7.5H8l-3 2.5v-2.5H2.5z"></path></svg>',
+  tick: '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"></path></svg>',
 };
 
 // Colour says what a step is for. Five families, so the map reads at a glance; the icon and the word say it too.
@@ -68,6 +73,10 @@ function ago(iso) {
   return `${Math.floor(s / 86400)}d`;
 }
 const agoWords = (t) => { const a = ago(t); return !a ? "at an unknown time" : a === "now" ? "just now" : `${a.replace("m", " min").replace("h", " h").replace("d", " d")} ago`; };
+
+const day = (iso) => { const d = new Date(iso); return Number.isFinite(d.getTime()) ? d.toLocaleDateString([], { day: "numeric", month: "short" }) : ""; };
+const dayTime = (iso) => { const d = new Date(iso); return Number.isFinite(d.getTime()) ? `${day(iso)} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : ""; };
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function clock(sec) {
   if (!Number.isFinite(sec)) return "";
@@ -89,6 +98,12 @@ const layout = (p) => layoutAt(p, { wrapAt: (window.innerWidth - 48) * 1.6 });
 const pipeline = () => S.data?.pipeline;
 const nodeName = (id, p = pipeline()) => p?.nodes.find((n) => n.id === id)?.name || id;
 const isGhostRun = (r) => r.path.some((id) => !pipeline().nodes.some((n) => n.id === id));
+
+// Code that moved since the map was last marked as checked, and the notes people left on steps.
+const since = () => S.data?.since || null;
+const sinceIds = () => new Set(since()?.changed || []);
+const notes = () => S.data?.notes || [];
+const notesOn = (ids) => { const set = new Set(ids); return notes().filter((n) => n.nodes.some((id) => set.has(id))); };
 
 function outcome(path, run, p = pipeline()) {
   const byId = new Map(p.nodes.map((n) => [n.id, n]));
@@ -156,7 +171,9 @@ function checkStatus() {
   if (S.error) return `<span role="status" class="err">${esc(S.error)}</span>`;
   if (schemaErr) return `<span role="status" class="red">${schemaErr} map ${schemaErr === 1 ? "error" : "errors"}</span>`;
   if (bad) return `<span role="status" class="red">${bad} of ${anchors.length} anchors broken</span>`;
-  return `<span role="status">${okCount} of ${anchors.length} anchors ok</span>`;
+  const sn = since();
+  const moved = !sn?.stamp ? "" : sn.changed.length ? ` · <span class="blue">${plural(sn.changed.length, "step")} behind the code</span>` : sn.uncovered.length ? "" : ` · code unchanged since ${esc(day(sn.stamp.takenAt))}`;
+  return `<span role="status">${okCount} of ${anchors.length} anchors ok${moved}</span>`;
 }
 
 function topBar() {
@@ -278,8 +295,9 @@ function canvas(p, L, look, edgeLook, extras = "", overlayHtml = "") {
     // The key at the bottom can single out one family: the rest steps back.
     const away = S.kind && !fams.includes(S.kind) ? " faded" : v.far ? " far" : "";
     const mix = n.members ? `<span class="mix" aria-hidden="true">${fams.map((f) => `<i class="${f ? `f-${f}` : ""}${S.kind && f !== S.kind ? " off" : ""}"></i>`).join("")}</span>` : "";
-    return `<button type="button" class="node${!n.members && fams[0] ? ` f-${fams[0]}` : ""}${n.members ? " lane" : ""} ${v.cls || ""}${away}" style="left:${x}px;top:${y}px" data-act="${v.act || "node"}" data-arg="${esc(v.arg ?? id)}" aria-label="${esc(v.aria)}"${v.expanded != null ? ` aria-expanded="${v.expanded}"` : ""}>
+    return `<button type="button" class="node${!n.members && fams[0] ? ` f-${fams[0]}` : ""}${n.members ? " lane" : ""} ${v.cls || ""}${away}" style="left:${x}px;top:${y}px" data-act="${v.act || "node"}" data-arg="${esc(v.arg ?? id)}" aria-label="${esc(v.aria)}"${v.expanded != null ? ` aria-expanded="${v.expanded}"` : ""}${v.pressed != null ? ` aria-pressed="${v.pressed}"` : ""}>
       <span class="port out" aria-hidden="true"></span>
+      ${v.pressed ? `<span class="tick" aria-hidden="true">${SVG.tick}</span>` : ""}${v.tag ? `<span class="tag-since" aria-hidden="true">${esc(v.tag)}</span>` : ""}${v.noteCount ? `<span class="nb" aria-hidden="true">${SVG.note}${v.noteCount}</span>` : ""}
       ${v.live ? '<span class="live-dot" aria-hidden="true"></span>' : ""}
       <span class="k">${icon(v.kind || n.kind)}<span>${esc(v.kindLabel ?? (v.kind || n.kind))}</span><span class="flag">${v.cue || ""}${esc(v.flag || "")}</span></span>
       <span class="nm">${esc(n.name || id)}</span>${v.note ? `<span class="what">${esc(v.note)}</span>` : ""}
@@ -311,6 +329,7 @@ function mapLook(states) {
   const live = liveAt();
   const p = pipeline();
   const leaves = new Set((p.edges || []).map((e) => e.from));
+  const moved = sinceIds();
   return (n) => {
     const s = S.data?.overlay?.nodes?.[n.id] || {};
     const v = { stat: mapStat(n.id), cls: "", flag: "", live: live.has(n.id), expanded: S.panelNode === n.id };
@@ -320,7 +339,11 @@ function mapLook(states) {
     else if (n.id === p.entry) v.flag = "start";
     else if (!leaves.has(n.id)) v.flag = "end";
     if (v.live) states.add("live");
-    v.aria = [n.name, n.kind, famLabel(FAMILY[n.kind]), v.stat, v.flag, v.live ? "a run is here now" : ""].filter(Boolean).join(", ");
+    if (moved.has(n.id)) { v.cls += " since"; v.tag = "code changed"; }
+    v.noteCount = notesOn([n.id]).length;
+    // Picking several steps: a tap adds or drops one, and no panel belongs to a single card.
+    if (S.multi && S.view === "map") { v.expanded = null; v.pressed = S.sel.includes(n.id); if (v.pressed) v.cls += " sel"; }
+    v.aria = [n.name, n.kind, famLabel(FAMILY[n.kind]), v.stat, v.flag, v.live ? "a run is here now" : "", v.tag ? "its code changed since the map was checked" : "", v.noteCount ? plural(v.noteCount, "note") : "", v.pressed ? "selected" : ""].filter(Boolean).join(", ");
     return v;
   };
 }
@@ -337,6 +360,7 @@ function viewMap() {
   const L = layout(p);
   const states = new Set();
   const look = mapLook(states);
+  const moved = sinceIds();
   const lookLane = (n) => {
     if (n.kind !== "lane") return look(n);
     const st = n.members.map((id) => S.data.overlay.nodes[id] || {});
@@ -346,11 +370,14 @@ function viewMap() {
     // The count of failures sits beside the hits, so the top row always reads "N steps ... open".
     if (failures) { v.cls = "failing"; v.statHtml = `${v.stat ? `${esc(v.stat)} · ` : ""}<span class="red">${failures} failed</span>`; states.add("failing"); }
     else if (st.every((x) => x.state === "cold")) { v.cls = "cold"; states.add("cold"); }
-    v.aria = `${n.name} lane, ${v.note ? `${v.note}, ` : ""}${v.kindLabel}${v.stat ? `, ${v.stat}` : ""}${failures ? `, ${failures} failed` : ""}, tap to open`;
+    const nMoved = n.members.filter((id) => moved.has(id)).length;
+    if (nMoved) { v.cls += " since"; v.tag = `${nMoved} changed`; }
+    v.noteCount = notesOn(n.members).length;
+    v.aria = `${n.name} lane, ${v.note ? `${v.note}, ` : ""}${v.kindLabel}${v.stat ? `, ${v.stat}` : ""}${failures ? `, ${failures} failed` : ""}${nMoved ? `, the code of ${plural(nMoved, "step")} changed since the map was checked` : ""}${v.noteCount ? `, ${plural(v.noteCount, "note")}` : ""}, tap to open`;
     return v;
   };
   // A tapped step lights its own lines and the steps they reach; the rest steps back.
-  const pick = S.panelNode && L.xy.has(S.panelNode) ? S.panelNode : null;
+  const pick = !S.multi && S.panelNode && L.xy.has(S.panelNode) ? S.panelNode : null;
   const near = new Set(pick ? [pick] : []);
   for (const e of pick ? p.edges || [] : []) { if (e.from === pick) near.add(e.to); if (e.to === pick) near.add(e.from); }
   const lookPick = (n) => { const v = lookLane(n); if (pick && !near.has(n.id)) v.far = true; return v; };
@@ -358,7 +385,7 @@ function viewMap() {
   const body = canvas(p, L, lookPick, edgeLook);
   const ghosts = S.data.overlay.ghosts || [];
   const note = `hits and median time · last ${S.data.runs.length} runs · updated ${agoWords(S.fetchedAt)}`;
-  const strip = setupStrips() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
+  const strip = setupStrips() + sinceStrip() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
   if (ghosts.length) states.add("ghost");
   // Runs that carry no steps: say it once, or the map looks broken.
   const bare = S.data.runs.length - (S.data.overlay.tracedCount || 0);
@@ -367,7 +394,88 @@ function viewMap() {
   const rej = S.data.rejectedEvents || 0, scr = S.data.scrubbedDecisions || 0;
   const cleaned = rej || scr ? `<div class="strip quiet"><div class="row"><span class="muted">${[rej ? `${rej} ${rej === 1 ? "event line was" : "event lines were"} unreadable and skipped` : "", scr ? `${scr} decision ${scr === 1 ? "value was" : "values were"} not a known label and ${scr === 1 ? "was" : "were"} replaced` : ""].filter(Boolean).join(" · ")}. See "Events" in the README.</span></div></div>` : "";
   const lens = (full.lanes || []).length > 1 ? `<div class="seg" role="group" aria-label="Lens"><button type="button" aria-pressed="${S.lens === "overview"}" data-act="lens" data-arg="overview">Overview</button><button type="button" aria-pressed="${S.lens === "all"}" data-act="lens" data-arg="all">All steps</button></div>` : "";
-  return `<div class="body"><main class="main">${strip}${blind}${cleaned}${body}${footer(states, note, true, lens)}</main>${S.panelNode ? nodePanel(S.panelNode) : ""}</div>`;
+  const all = notes().length;
+  const notesBtn = all ? `<button type="button" class="btn quiet" data-act="side" data-arg="notes" aria-pressed="${S.side === "notes" && !S.multi && !S.panelNode}">${SVG.note}Notes ${all}</button>` : "";
+  const side = S.multi ? selPanel() : S.panelNode ? nodePanel(S.panelNode) : S.side === "since" ? sincePanel() : S.side === "notes" ? notesPanel() : "";
+  return `<div class="body"><main class="main">${strip}${blind}${cleaned}${body}${footer(states, note, true, lens + notesBtn)}</main>${side}</div>`;
+}
+
+// The Map says when the code moved on since the map was last marked as checked.
+// It compares fingerprints of the files the steps point at: exact, and it says which files, never what they mean.
+function sinceStrip() {
+  const sn = since();
+  if (!sn) return "";
+  const busy = S.busy === "stamp";
+  const err = S.writeError?.at === "stamp" ? `<span class="err" role="alert">${esc(S.writeError.text)}</span>` : "";
+  const mark = S.confirm === "stamp" || busy
+    ? `<span class="muted">This records that the map matches the code as it is right now.</span><button type="button" class="btn primary" data-act="stamp"${busy ? " disabled" : ""}>${busy ? `${SVG.spin}Saving` : "Yes, it matches"}</button><button type="button" class="btn quiet" data-act="cancel"${busy ? " disabled" : ""}>Cancel</button>`
+    : `<button type="button" class="btn quiet" data-act="ask-stamp">Mark as checked</button>`;
+  // A map with a broken or missing link to the code cannot be marked: the server refuses it too.
+  const anchors = S.data?.check?.anchors || [];
+  const bad = anchors.filter((a) => ["missing-file", "missing-symbol", "no-repo"].includes(a.status)).length;
+  const blocked = bad || !anchors.some((a) => a.status === "ok") || (S.data?.check?.errors || []).length;
+  if (!sn.stamp && blocked) return "";
+  if (!sn.stamp) return `<div class="strip quiet since-strip"><div class="row"><span class="muted">Nobody has marked this map as checked against the code yet, so XPM cannot say when the code moves on.</span>${err}</div><div class="row">${mark}</div></div>`;
+  const n = sn.changed.length, u = sn.uncovered.length;
+  if (!n && !u) return "";
+  const v0 = sn.stamp.codeVersion, v1 = sn.codeVersion;
+  const head = `this map was checked on ${esc(day(sn.stamp.takenAt))}${v0 ? `, against version ${esc(v0)}` : ""}.${v0 && v1 && v0 !== v1 ? ` The code is now ${esc(v1)}.` : ""}`;
+  const moved = n ? ` ${plural(n, "step sits", "steps sit")} in ${plural(sn.files.length, "file")} that changed since.` : "";
+  const added = u ? ` ${plural(u, "step was", "steps were")} added to the map, or pointed at another file, after that check.` : "";
+  return `<div class="strip since-strip"><div class="row"><b class="blue">${n ? "Code moved:" : "Map edited:"}</b><span>${head}${moved}${added}</span>${err}</div><div class="row"><button type="button" class="btn" data-act="side" data-arg="since" aria-pressed="${S.side === "since" && !S.multi && !S.panelNode}">See what changed</button>${blocked ? `<span class="muted">Fix the broken steps before marking the map as checked.</span>` : mark}</div></div>`;
+}
+
+const stepHop = (id, act = "goto", tail = "") => `<li><button type="button" class="hop" data-act="${act}" data-arg="${esc(id)}"><i class="fd f-${FAMILY[pipeline().nodes.find((y) => y.id === id)?.kind] || ""}"></i><span>${esc(nodeName(id))}</span>${tail}</button></li>`;
+const closeBtn = (label) => `<button type="button" class="icon-btn" aria-label="${label}" data-act="close-panel">${SVG.close}</button>`;
+
+function sincePanel() {
+  const sn = since();
+  if (!sn?.stamp) return "";
+  const files = sn.files.map((f) => `<section class="hops"><h3 class="file">${esc(f.file)}</h3><p class="muted when">${f.state === "gone" ? "the file is gone" : `changed${f.changedAt ? ` ${esc(day(f.changedAt))}` : ""}`}</p><ul>${f.nodes.map((id) => stepHop(id)).join("")}</ul></section>`).join("");
+  const added = sn.uncovered.length ? `<section class="hops"><h3>new on the map since the check</h3><ul>${sn.uncovered.map((id) => stepHop(id)).join("")}</ul></section>` : "";
+  return `<aside class="side" aria-label="What changed since the check"><div class="side-h"><div class="top"><span class="title"><b>Changed since the check</b><span>checked ${esc(dayTime(sn.stamp.takenAt))}${sn.stamp.by ? ` by ${esc(sn.stamp.by)}` : ""}${sn.stamp.how ? `, ${esc(sn.stamp.how)}` : ""}</span></span>${closeBtn("Close the list of changes")}</div></div>
+    <div class="side-body">${files}${added}</div>
+    <div class="side-foot">A changed file does not say which step in it changed. Read the step, fix the map if it is wrong, then mark the map as checked.</div></aside>`;
+}
+
+// ---------- notes ----------
+function noteItem(n, withSteps) {
+  const p = pipeline();
+  const known = n.nodes.filter((id) => p.nodes.some((x) => x.id === id));
+  const steps = withSteps || n.nodes.length > 1 ? `<span class="meta">${esc(n.nodes.map((id) => nodeName(id)).join(" · "))}</span>` : "";
+  const key = `del:${n.id}`;
+  const sure = S.confirm === key, busy = S.busy === key;
+  const err = S.writeError?.at === key ? `<span class="err" role="alert">${esc(S.writeError.text)}</span>` : "";
+  return `<li class="note"><span class="meta">${esc(dayTime(n.at))}${n.by ? ` · ${esc(n.by)}` : ""}</span>${steps}<p>${esc(n.text)}</p>${err}
+    <span class="row">${withSteps && known.length ? `<button type="button" class="btn quiet" data-act="show-note" data-arg="${esc(n.id)}">Show ${known.length === 1 ? "the step" : `the ${known.length} steps`}</button>` : ""}<button type="button" class="btn quiet${sure ? " red" : ""}" data-act="del-note" data-arg="${esc(n.id)}"${busy ? " disabled" : ""}>${busy ? `${SVG.spin}Deleting` : sure ? "Tap again to delete" : "Delete"}</button></span></li>`;
+}
+
+function notesBlock(ids) {
+  const list = notesOn(ids);
+  return `<section class="notes"><h3>notes</h3>${list.length ? `<ul>${list.map((n) => noteItem(n, false)).join("")}</ul>` : `<p class="muted none">No notes on ${ids.length === 1 ? "this step" : "these steps"} yet.</p>`}</section>`;
+}
+
+// The box stays at the foot of the panel. Its text lives in S.noteText, so a redraw never loses what was typed.
+function noteBox(ids, more = "") {
+  const busy = S.busy === "note";
+  const err = S.writeError?.at === "note" ? `<span class="err" role="alert">${esc(S.writeError.text)}</span>` : "";
+  const about = ids.length === 1 ? "this step" : `these ${ids.length} steps`;
+  return `<div class="note-box"><label class="sr" for="note-text">A note on ${about}</label>
+    <textarea id="note-text" data-act="note-text" rows="3" maxlength="2000" placeholder="${ids.length ? `Write a note on ${about}` : "Pick a step first"}"${ids.length ? "" : " disabled"}>${esc(S.noteText)}</textarea>${err}
+    <div class="row"><button type="button" class="btn primary" data-act="save-note"${busy || !ids.length || !S.noteText.trim() ? " disabled" : ""}>${busy ? `${SVG.spin}Saving` : "Save note"}</button>${more}</div></div>`;
+}
+
+function selPanel() {
+  const p = pipeline();
+  const ids = S.sel.filter((id) => p.nodes.some((n) => n.id === id));
+  return `<aside class="side tall" aria-label="Selected steps"><div class="side-h"><div class="top"><span class="title"><b>${plural(ids.length, "step")} selected</b><span>tap steps on the map to add or drop them</span></span>${closeBtn("Close the selection")}</div></div>
+    <div class="side-body">${ids.length ? `<section class="hops"><h3>selected</h3><ul>${ids.map((id) => stepHop(id, "unsel", '<span class="chip-in">drop</span>')).join("")}</ul></section>${notesBlock(ids)}` : '<p class="about muted">Tap a step on the map.</p>'}</div>${noteBox(ids)}</aside>`;
+}
+
+function notesPanel() {
+  const list = notes();
+  return `<aside class="side" aria-label="All notes"><div class="side-h"><div class="top"><span class="title"><b>Notes</b><span>${plural(list.length, "note")} on this pipeline, newest first</span></span>${closeBtn("Close the notes")}</div></div>
+    <div class="side-body"><section class="notes">${list.length ? `<ul>${list.map((n) => noteItem(n, true)).join("")}</ul>` : '<p class="muted none">No notes yet. Tap a step to write one.</p>'}</section></div></aside>`;
 }
 
 function nodePanel(id) {
@@ -378,9 +486,11 @@ function nodePanel(id) {
   const chk = (S.data.check.anchors || []).find((x) => x.node === id);
   const s = S.data.overlay.nodes[id] || {};
   const status = !chk ? "" : chk.status === "ok" ? "found in the code" : chk.status === "unanchored" ? "no anchor yet" : `<span class="red">${esc(chk.status.replace("-", " "))}${chk.detail ? `: ${esc(chk.detail)}` : ""}</span>`;
+  const sn = since();
+  const moved = !sn?.stamp || !a.path ? "" : sn.changed.includes(id) ? `<span class="blue">its file changed since the check on ${esc(day(sn.stamp.takenAt))}</span>` : sn.uncovered.includes(id) ? "not covered by the last check" : `same since the check on ${esc(day(sn.stamp.takenAt))}`;
   const rows = [
     ["kind", `${FAMILY[n.kind] ? `<i class="fd f-${FAMILY[n.kind]}"></i> ` : ""}${esc(n.kind)}${FAMILY[n.kind] ? ` <span class="muted">· ${famLabel(FAMILY[n.kind]).toLowerCase()}</span>` : ""}`], ["lane", esc(n.lane || "")], ["owner", esc(n.owner || "")],
-    ["repo", esc(a.repo || "")], ["file", esc(a.path || "")], ["function", esc(a.symbol || "")], ["code check", status],
+    ["repo", esc(a.repo || "")], ["file", esc(a.path || "")], ["function", esc(a.symbol || "")], ["code check", status], ["code since", moved],
     ["decides", esc(n.decides || "")], ["last 50 runs", `${s.hits || 0} hits${s.medianMs != null ? `, median ${ms(s.medianMs)}` : ""}${s.failures ? `, <span class="red">${s.failures} failed</span>` : ""}`],
   ].filter(([, v]) => v);
   const name = (x) => p.nodes.find((y) => y.id === x)?.name || x;
@@ -388,12 +498,12 @@ function nodePanel(id) {
   const link = (e, other, from) => { const a = answer(e, from); return `<li><button type="button" class="hop" data-act="goto" data-arg="${esc(other)}"><i class="fd f-${FAMILY[p.nodes.find((y) => y.id === other)?.kind] || ""}"></i><span>${esc(name(other))}</span>${a ? `<span class="chip-in">${esc(a)}</span>` : ""}</button></li>`; };
   const ins = (p.edges || []).filter((e) => e.to === id), outs = (p.edges || []).filter((e) => e.from === id);
   const hops = (title, list, html) => (list.length ? `<section class="hops"><h3>${title}</h3><ul>${html}</ul></section>` : "");
-  return `<aside class="side" aria-label="Step details"><div class="side-h"><div class="top"><span class="title"><b>${esc(n.name)}</b><span>${esc(n.id)}</span></span><button type="button" class="icon-btn" aria-label="Close details" data-act="close-panel">${SVG.close}</button></div></div>
+  return `<aside class="side tall" aria-label="Step details"><div class="side-h"><div class="top"><span class="title"><b>${esc(n.name)}</b><span>${esc(n.id)}</span></span><button type="button" class="icon-btn" aria-label="Close details" data-act="close-panel">${SVG.close}</button></div></div>
     <div class="side-body">${n.description ? `<p class="about">${esc(n.description)}</p>` : ""}
     ${hops("comes from", ins, ins.map((e) => link(e, e.from, p.nodes.find((y) => y.id === e.from) || {})).join(""))}
     ${hops("goes to", outs, outs.map((e) => link(e, e.to, n)).join(""))}
     ${!outs.length ? '<p class="muted ends">The path ends here.</p>' : ""}
-    <dl class="detail">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></div></aside>`;
+    <dl class="detail">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>${notesBlock([id])}</div>${noteBox([id], '<button type="button" class="btn quiet" data-act="multi">Select more steps</button>')}</aside>`;
 }
 
 function viewRuns() {
@@ -608,6 +718,7 @@ function render() {
   const app = document.getElementById("app");
   const keep = {};
   app.querySelectorAll("[data-keep]").forEach((el) => { keep[el.dataset.keep] = [el.scrollLeft, el.scrollTop]; });
+  const caret = document.activeElement?.id === "note-text" ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   const focusKey = document.activeElement?.dataset?.act ? `${document.activeElement.dataset.act}|${document.activeElement.dataset.arg || ""}` : null;
 
   let body;
@@ -622,7 +733,7 @@ function render() {
   if (focusKey) {
     const [act, arg] = focusKey.split("|");
     const el = [...app.querySelectorAll(`[data-act="${act}"]`)].find((x) => (x.dataset.arg || "") === arg);
-    if (el) el.focus({ preventScroll: true });
+    if (el) { el.focus({ preventScroll: true }); if (caret && el.id === "note-text") el.setSelectionRange(caret[0], caret[1]); }
   }
   const sc = app.querySelector(".scroll");
   const stage = app.querySelector(".stage");
@@ -665,6 +776,7 @@ function resetPipeline() {
   S.picked = null; S.step = null; S.panelNode = null; S.changedIds = null; S.kind = null;
   S.draft = null; S.draftClosed = false; S.result = null; S.replaying = false; S.replayError = null;
   S.userZoomed = false; S.zoom = null;
+  S.multi = false; S.sel = []; S.side = null; S.noteText = ""; S.busy = null; S.writeError = null; S.confirm = null;
   if (S.filter === "changed") S.filter = "all";
 }
 
@@ -691,11 +803,12 @@ async function loadProject(id, wantPipeline) {
 async function loadPipeline({ quiet = false } = {}) {
   if (!S.pipelineId) { S.loading = false; S.error = "This project has no pipelines yet."; render(); return; }
   const req = quiet ? S.req : ++S.req;
+  const writes = S.writes;
   if (!quiet) { S.loading = true; render(); }
   try {
     const base = `/api/project/${encodeURIComponent(S.project)}/pipeline/${encodeURIComponent(S.pipelineId)}`;
     const [data, drafts] = await Promise.all([getJson(base), getJson(`${base}/drafts`)]);
-    if (req !== S.req) return;
+    if (req !== S.req || (quiet && writes !== S.writes)) return;
     S.data = data; S.drafts = drafts; S.error = null; S.fetchedAt = Date.now();
     if (!quiet || !S.source) loadSource();
     const params = new URLSearchParams(location.search);
@@ -721,6 +834,38 @@ async function loadSource(refresh = false) {
   if (project !== S.project) return;
   S.source = src;
   render();
+}
+
+// Writes wait for the server's answer before the page changes. A failure stays on screen, with what was typed.
+async function write(key, url, opts, apply) {
+  if (S.busy) return;
+  const req = S.req;
+  S.busy = key; S.writeError = null; render();
+  try {
+    const out = await getJson(url, opts);
+    if (req === S.req) { S.writes += 1; apply(out); }
+  } catch (err) {
+    if (req === S.req) S.writeError = { at: key, text: `Not saved: ${err.message}` };
+  } finally {
+    if (req === S.req) { S.busy = null; S.confirm = null; render(); }
+  }
+}
+const apiBase = () => `/api/project/${encodeURIComponent(S.project)}/pipeline/${encodeURIComponent(S.pipelineId)}`;
+const post = (body) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+function stampMap() {
+  write("stamp", `${apiBase()}/stamp`, post({}), (out) => { S.data.since = out.since; if (S.side === "since") S.side = null; });
+}
+
+function saveNote() {
+  const ids = S.multi ? S.sel : S.panelNode ? [S.panelNode] : [];
+  const text = S.noteText.trim();
+  if (!ids.length || !text) return;
+  write("note", `${apiBase()}/notes`, post({ nodes: ids, text }), (out) => { S.data.notes = out.notes; S.noteText = ""; });
+}
+
+function deleteNote(id) {
+  write(`del:${id}`, `${apiBase()}/notes/${encodeURIComponent(id)}`, { method: "DELETE" }, (out) => { S.data.notes = out.notes; });
 }
 
 async function replay() {
@@ -776,17 +921,43 @@ function exportSpec() {
 // ---------- events ----------
 document.addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-act]");
-  if (!el) { if (S.menu) { S.menu = null; render(); } return; }
+  if (!el) { if (S.menu || S.confirm) { S.menu = null; S.confirm = null; render(); } return; }
   const act = el.dataset.act, arg = el.dataset.arg;
+  if (act === "note-text") return;
+  // "Are you sure" lasts one tap: anything else takes it back.
+  if (act !== "stamp" && act !== "del-note") S.confirm = null;
   if (act !== "menu" && S.menu && !el.closest(".menu")) S.menu = null;
   switch (act) {
     case "menu": S.menu = S.menu === arg ? null : arg; break;
     case "set-project": S.menu = null; loadProject(arg); return;
     case "set-pipeline": S.menu = null; S.pipelineId = arg; resetPipeline(); loadPipeline(); return;
-    case "view": S.view = arg; S.userZoomed = false; if (el.dataset.filter) S.filter = el.dataset.filter; if (arg !== "map") S.panelNode = null; syncUrl(); break;
-    case "node": if (S.view === "map") S.panelNode = S.panelNode === arg ? null : arg; break;
-    case "goto": { S.panelNode = arg; const lane = pipeline()?.nodes.find((n) => n.id === arg)?.lane; if (lane && S.lens === "overview" && !S.openLanes.has(lane)) { S.openLanes.add(lane); S.userZoomed = false; } break; }
-    case "close-panel": S.panelNode = null; break;
+    case "view": S.view = arg; S.userZoomed = false; if (el.dataset.filter) S.filter = el.dataset.filter; if (arg !== "map") { S.panelNode = null; S.multi = false; S.sel = []; S.side = null; } syncUrl(); break;
+    case "node":
+      if (S.view !== "map") break;
+      if (S.multi) S.sel = S.sel.includes(arg) ? S.sel.filter((x) => x !== arg) : [...S.sel, arg];
+      else { S.panelNode = S.panelNode === arg ? null : arg; S.side = null; }
+      break;
+    case "goto": { S.multi = false; S.sel = []; S.side = null; S.panelNode = arg; const lane = pipeline()?.nodes.find((n) => n.id === arg)?.lane; if (lane && S.lens === "overview" && !S.openLanes.has(lane)) { S.openLanes.add(lane); S.userZoomed = false; } break; }
+    case "close-panel": S.panelNode = null; S.multi = false; S.sel = []; S.side = null; break;
+    case "multi": S.multi = true; S.sel = S.panelNode ? [S.panelNode] : []; S.panelNode = null; S.side = null; break;
+    case "unsel": S.sel = S.sel.filter((x) => x !== arg); break;
+    case "side": { const open = S.side === arg && !S.multi && !S.panelNode; S.side = open ? null : arg; S.panelNode = null; S.multi = false; S.sel = []; break; }
+    case "show-note": {
+      const n = notes().find((x) => x.id === arg), p = pipeline();
+      if (!n) break;
+      const ids = n.nodes.filter((id) => p.nodes.some((x) => x.id === id));
+      if (!ids.length) break;
+      // One step opens as usual. Several are shown picked together.
+      S.side = null; S.multi = ids.length > 1; S.sel = S.multi ? ids : []; S.panelNode = S.multi ? null : ids[0];
+      // A step folded inside a lane card cannot be shown as picked: open its lane.
+      if (S.lens === "overview") { for (const id of ids) { const lane = p.nodes.find((x) => x.id === id)?.lane; if (lane) S.openLanes.add(lane); } S.userZoomed = false; }
+      break;
+    }
+    case "ask-stamp": S.confirm = "stamp"; S.writeError = null; break;
+    case "cancel": S.confirm = null; break;
+    case "stamp": stampMap(); return;
+    case "save-note": saveNote(); return;
+    case "del-note": if (S.confirm === `del:${arg}`) { deleteNote(arg); return; } S.confirm = `del:${arg}`; break;
     case "toggle-files": S.showFiles = !S.showFiles; break;
     case "setup-refresh": S.source = null; render(); loadSource(true); return;
     case "kind": S.kind = S.kind === arg ? null : arg; break;
@@ -811,15 +982,24 @@ document.addEventListener("click", (ev) => {
   render();
 });
 
+// Typing a note never redraws the page: the text is kept, and only the Save button wakes up.
+document.addEventListener("input", (ev) => {
+  if (ev.target.id !== "note-text") return;
+  S.noteText = ev.target.value;
+  const save = document.querySelector('[data-act="save-note"]');
+  if (save) save.disabled = !!S.busy || !S.noteText.trim();
+});
+
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && (S.menu || S.panelNode)) { S.menu = null; S.panelNode = null; render(); }
+  if (ev.key === "Escape" && (S.menu || S.panelNode || S.multi || S.side || S.confirm)) { S.menu = null; S.panelNode = null; S.multi = false; S.sel = []; S.side = null; S.confirm = null; render(); }
 });
 
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (!S.userZoomed) S.zoom = null; render(); }, 150); });
 
 // Fresh data every 30 s while looking at the map or the runs; the footer age updates with it.
-setInterval(() => { if (document.visibilityState === "visible" && S.data && S.view !== "draft" && !S.loading) loadPipeline({ quiet: true }); }, 30000);
+// Not while a note is being typed: a redraw under the keyboard can close it on a tablet.
+setInterval(() => { if (document.visibilityState === "visible" && S.data && S.view !== "draft" && !S.loading && !S.busy && document.activeElement?.id !== "note-text") loadPipeline({ quiet: true }); }, 30000);
 
 (async function init() {
   const q = new URLSearchParams(location.search);
