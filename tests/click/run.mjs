@@ -2,10 +2,11 @@
 // Run with `npm run test:click`. Needs Chromium on the machine (or CHROMIUM=/path/to/it); nothing to install.
 // It starts its own XPM on a free port with the example bot plus three small fixtures made on the spot:
 // edge-bot (a run that only just started, an unreadable line, a decision that is not a label),
-// broken-bot (a map the engine refuses) and noname-bot (a project without a name).
+// broken-bot (a map the engine refuses), noname-bot (a project without a name), bare-bot (runs with no steps)
+// and moved-bot (a copy of the example code the checks may edit, to see the map notice that the code moved).
 // SHOTS=/some/folder also saves screenshots there.
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,10 @@ variant("edge-bot", () => {});
 variant("broken-bot", (m) => { m.pipelines[0].nodes[1].kind = "wizard"; m.pipelines[0].edges.push({ from: "receive", to: "nowhere" }); });
 variant("noname-bot", (m) => { delete m.name; });
 variant("bare-bot", () => {});
+// Its steps point at a copy of the example code under another repo name, so editing a file here touches nothing in the repo.
+variant("moved-bot", (m) => { for (const n of m.pipelines[0].nodes) if (n.anchor) n.anchor.repo = "moved"; });
+cpSync(path.join(root, "examples/example-bot"), path.join(tmp, "code"), { recursive: true });
+writeFileSync(path.join(tmp, "repos.json"), JSON.stringify({ moved: path.join(tmp, "code") }));
 const at = (agoMs) => new Date(Date.now() - agoMs).toISOString();
 const line = (runId, agoMs, seq, type, node, metadata = {}) => JSON.stringify({ runId, ts: at(agoMs), seq, pipeline: "inbound", type, ...(node ? { node } : {}), metadata });
 mkdirSync(path.join(tmp, "events/edge-bot"), { recursive: true });
@@ -44,7 +49,7 @@ writeFileSync(path.join(tmp, "events/bare-bot", `${at(20000).slice(0, 10)}.jsonl
 
 // ---------- the app and the browser ----------
 const port = await freePort();
-const server = spawn(process.execPath, ["server.js"], { cwd: root, stdio: "ignore", env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", MANIFESTS_DIR: [path.join(root, "manifests"), path.join(tmp, "manifests")].join(path.delimiter), XPM_EVENTS_DIR: path.join(tmp, "events"), XPM_DRAFTS_DIR: path.join(tmp, "drafts"), XPM_PROJECTS: path.join(tmp, "no-profiles.json"), XPM_ALLOWED_LOGINS: "", XPM_ALLOWED_NODES: "", XPM_DENIED_NODES: "", XPM_ALLOWED_HOSTS: "" } });
+const server = spawn(process.execPath, ["server.js"], { cwd: root, stdio: "ignore", env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", MANIFESTS_DIR: [path.join(root, "manifests"), path.join(tmp, "manifests")].join(path.delimiter), XPM_EVENTS_DIR: path.join(tmp, "events"), XPM_DRAFTS_DIR: path.join(tmp, "drafts"), XPM_STATE_DIR: path.join(tmp, "state"), XPM_REPOS: path.join(tmp, "repos.json"), XPM_PROJECTS: path.join(tmp, "no-profiles.json"), XPM_ALLOWED_LOGINS: "", XPM_ALLOWED_NODES: "", XPM_DENIED_NODES: "", XPM_ALLOWED_HOSTS: "" } });
 const base = `http://127.0.0.1:${port}`;
 for (let i = 0; i < 40; i++) { try { if ((await fetch(`${base}/api/projects`)).ok) break; } catch { await sleep(150); } }
 const b = await open(bin);
@@ -236,6 +241,140 @@ try {
   await b.click(q('[data-act="view"][data-arg="runs"]'), 300);
   check("a broken map stays an error list on Runs too", (await b.text("main")).includes("cannot be drawn"));
   await shot("broken-map");
+
+  // ---------- the code moved on, and notes on steps ----------
+  const type = (text) => b.ev(`(() => { const t = document.querySelector("#note-text"); if (!t) return "MISSING"; t.focus(); t.value = ${JSON.stringify(text)}; t.setSelectionRange(3, 3); t.dispatchEvent(new Event("input", { bubbles: true })); return "ok"; })()`);
+  const typed = () => b.ev(`document.querySelector("#note-text")?.value`);
+  const saveOff = () => b.ev(`document.querySelector('[data-act="save-note"]').disabled`);
+  const stampFile = path.join(tmp, "state/stamps/moved-bot/inbound.json");
+  await b.go(page("moved-bot", "map"));
+  check("a map nobody checked says so, and flags nothing", (await b.text(".since-strip")).includes("Nobody has marked this map as checked") && (await count(".node.since")) === 0 && !(await b.text(".status")).includes("since"));
+  await b.click(q('[data-act="ask-stamp"]'));
+  check("Mark as checked asks first and writes nothing yet", (await b.text(".since-strip")).includes("Yes, it matches") && !existsSync(stampFile));
+  await b.click(q('[data-act="cancel"]'));
+  check("Cancel takes the question back", (await count('[data-act="stamp"]')) === 0 && (await count('[data-act="ask-stamp"]')) === 1);
+  await b.click(q('[data-act="ask-stamp"]'));
+  await b.click(q('[data-act="zoom"][data-arg="1"]'));
+  check("any other tap takes the question back too", (await count('[data-act="stamp"]')) === 0 && !existsSync(stampFile));
+  await b.click(q('[data-act="ask-stamp"]'));
+  await b.click(q('[data-act="stamp"]'), 500);
+  check("a checked map says since when the code is unchanged", (await count(".since-strip")) === 0 && (await b.text(".status")).includes("9 of 9 anchors ok · code unchanged since") && existsSync(stampFile));
+
+  appendFileSync(path.join(tmp, "code/src/agent.js"), "// edited after the check\n");
+  writeFileSync(path.join(tmp, "code/VERSION"), "1.5.0\n");
+  await b.go(page("moved-bot", "map"));
+  const strip = await b.text(".since-strip");
+  check("the map says the code moved, since which version, and how much", strip.includes("Code moved:") && strip.includes("against version 1.4.0") && strip.includes("The code is now 1.5.0.") && strip.includes("2 steps sit in 1 file that changed since."));
+  check("the status counts the steps behind the code", (await b.text(".status")).replace(/\s+/g, " ").includes("9 of 9 anchors ok · 2 steps behind the code"));
+  check("exactly the steps in the changed file are tagged", (await b.ev(`[...document.querySelectorAll(".node.since")].map((n) => n.dataset.arg + ":" + n.querySelector(".tag-since").innerText).sort().join()`)) === "agent:code changed,private-model:code changed");
+  check("the tag is in the step's spoken label", (await b.ev(`${q('.node[data-arg="agent"]')}.getAttribute("aria-label")`)).includes("its code changed since the map was checked"));
+  await b.click(q('[data-act="lens"][data-arg="overview"]'), 300);
+  check("a folded lane counts its changed steps", (await b.ev(`[...document.querySelectorAll(".node .tag-since")].map((t) => t.innerText).join()`)) === "2 changed" && (await b.ev(`document.querySelector(".node.since").getAttribute("aria-label")`)).includes("the code of 2 steps changed"));
+  await b.click(q('[data-act="lens"][data-arg="all"]'), 300);
+  await shot("code-moved");
+
+  await b.click(q('[data-act="side"][data-arg="since"]'));
+  check("See what changed lists the file and the steps in it", (await b.text(".side")).includes("moved:src/agent.js") && (await b.text(".side")).includes("Private model") && (await b.text(".side")).includes("Agent") && (await b.text(".side-foot")).includes("does not say which step"));
+  check("the list holds no folder path of this machine", !(await b.text(".side")).includes(tmp));
+  check("every step in the list is at least 42 px tall", await b.ev(`[...document.querySelectorAll(".side .hop")].length === 2 && [...document.querySelectorAll(".side .hop")].every((h) => h.getBoundingClientRect().height >= 42)`));
+  await shot("code-moved-list");
+  await b.click(q('.side .hop[data-arg="agent"]'));
+  check("a step in the list opens that step, which says its file changed", (await b.text(".side-h")).includes("Agent") && (await b.text(".detail")).includes("its file changed since the check"));
+  await b.click(q('.node[data-arg="receive"]'));
+  check("an untouched step says it is the same since the check", (await b.text(".detail")).includes("same since the check"));
+
+  // one note on one step
+  check("an empty note cannot be saved", (await saveOff()) === true && (await b.text(".notes")).includes("No notes on this step yet"));
+  await type("Why does this step run before the gate?\nSecond line.");
+  check("typing wakes the Save button without a redraw", (await saveOff()) === false);
+  await b.ev(`loadPipeline({ quiet: true })`);
+  await sleep(400);
+  check("a refresh while typing keeps the text, the focus and the caret", (await typed()).startsWith("Why does this step") && (await b.ev(`document.activeElement.id + ":" + document.activeElement.selectionStart`)) === "note-text:3");
+  // a save that fails: the reason stays on screen, the text stays in the box
+  await b.ev(`(window.realFetch = window.fetch, window.fetch = (u, o) => (o && o.method === "POST" ? Promise.resolve(new Response(JSON.stringify({ error: "the disk is full" }), { status: 500 })) : window.realFetch(u, o)))`);
+  await b.click(q('[data-act="save-note"]'), 300);
+  check("a note that could not be saved says why and keeps the text", (await b.text('.note-box [role="alert"]')).includes("Not saved: the disk is full") && (await typed()).startsWith("Why does this step") && (await count(".note")) === 0 && (await saveOff()) === false);
+  // a slow save: the button waits, a second tap writes nothing twice
+  await b.ev(`window.fetch = (u, o) => new Promise((r) => setTimeout(r, 500)).then(() => window.realFetch(u, o))`);
+  await b.click(q('[data-act="save-note"]'), 100);
+  check("a save in flight shows it and cannot be tapped again", (await b.text('[data-act="save-note"]')).includes("Saving") && (await saveOff()) === true && (await count('.note-box [role="alert"]')) === 0);
+  await b.click(q('[data-act="save-note"]'), 900);
+  await b.ev(`window.fetch = window.realFetch`);
+  check("the note shows once the server has it, and the box empties", (await count(".side .note")) === 1 && (await b.text(".side .note")).includes("Second line.") && (await typed()) === "" && (await saveOff()) === true);
+  check("a note keeps its line breaks", (await b.ev(`getComputedStyle(document.querySelector(".note p")).whiteSpace`)) === "pre-wrap");
+  check("the step carries a note count", (await b.text('.node[data-arg="receive"] .nb')).trim() === "1" && (await b.ev(`${q('.node[data-arg="receive"]')}.getAttribute("aria-label")`)).includes("1 note"));
+  check("the note box does not make a phone zoom", (await b.ev(`parseFloat(getComputedStyle(document.querySelector("#note-text")).fontSize)`)) >= 16);
+  await shot("note-on-a-step");
+
+  // one note on several steps
+  await type("Text typed before picking more steps.");
+  await b.click(q('[data-act="multi"]'));
+  check("Select more steps starts from the open step and keeps what was typed", (await b.text(".side-h")).includes("1 step selected") && (await typed()) === "Text typed before picking more steps." && (await count(".node.sel")) === 1);
+  await b.click(q('.node[data-arg="dedupe"]'));
+  await b.click(q('.node[data-arg="reply"]'));
+  check("tapping steps adds them to the selection", (await b.text(".side-h")).includes("3 steps selected") && (await count('.node.sel[aria-pressed="true"]')) === 3 && (await count(".node.far")) === 0);
+  await b.click(q('.node[data-arg="dedupe"]'));
+  check("tapping a picked step drops it", (await b.text(".side-h")).includes("2 steps selected") && (await count(".node.sel")) === 2);
+  await b.click(q('.side [data-act="unsel"][data-arg="reply"]'));
+  await b.click(q('.node[data-arg="reply"]'));
+  check("the list in the panel drops a step as well", (await b.ev(`[...document.querySelectorAll(".node.sel")].map((n) => n.dataset.arg).sort().join()`)) === "receive,reply");
+  await type("These two belong together.");
+  await b.click(q('[data-act="save-note"]'), 500);
+  check("one note can be about several steps", (await b.ev(`[...document.querySelectorAll(".side .note")].length`)) === 2 && (await b.text(".side .note")).includes("Receive update · Send reply") && (await b.text('.node[data-arg="reply"] .nb')).trim() === "1" && (await b.text('.node[data-arg="receive"] .nb')).trim() === "2");
+  await shot("note-on-several-steps");
+  let small2 = await b.ev(`[...document.querySelectorAll("button, textarea")].filter((x) => x.offsetParent && !x.classList.contains("node") && x.getBoundingClientRect().height < 42).map((x) => (x.getAttribute("aria-label") || x.innerText).slice(0, 30))`);
+  check(`every control is at least 42 px tall while picking steps ${JSON.stringify(small2)}`, small2.length === 0);
+  await b.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))`);
+  check("Escape ends the selection", (await count(".side")) === 0 && (await count(".node.sel")) === 0);
+
+  // all notes
+  check("the footer counts the notes", (await b.text('[data-act="side"][data-arg="notes"]')).includes("Notes 2"));
+  await b.click(q('[data-act="side"][data-arg="notes"]'));
+  check("Notes lists every note, newest first, with its steps", (await b.ev(`[...document.querySelectorAll(".side .note p")].map((p) => p.innerText.split("\\n")[0]).join("|")`)) === "These two belong together.|Why does this step run before the gate?" && (await b.text(".side")).includes("Receive update · Send reply"));
+  small2 = await b.ev(`[...document.querySelectorAll("button")].filter((x) => x.offsetParent && !x.classList.contains("node") && x.getBoundingClientRect().height < 42).map((x) => (x.getAttribute("aria-label") || x.innerText).slice(0, 30))`);
+  check(`every control is at least 42 px tall in the notes list ${JSON.stringify(small2)}`, small2.length === 0);
+  await shot("notes-list");
+  await b.click(q('.side .note [data-act="show-note"]'));
+  check("Show the steps picks the steps of that note on the map", (await b.ev(`[...document.querySelectorAll(".node.sel")].map((n) => n.dataset.arg).sort().join()`)) === "receive,reply" && (await b.text(".side-h")).includes("2 steps selected"));
+  await b.click(q('[data-act="close-panel"]'));
+  await b.click(q('[data-act="side"][data-arg="notes"]'));
+  await b.click(`document.querySelectorAll('.side .note [data-act="show-note"]')[1]`);
+  check("a note on one step opens that step", (await b.text(".side-h")).includes("Receive update") && (await count(".node.sel")) === 0 && (await count(".side .note")) === 2);
+  await b.click(q('[data-act="close-panel"]'));
+  await b.click(q('[data-act="side"][data-arg="notes"]'));
+  await b.click(q('.side .note [data-act="del-note"]'));
+  check("Delete asks for a second tap and deletes nothing yet", (await b.text('.side .note [data-act="del-note"]')).includes("Tap again to delete") && (await count(".side .note")) === 2);
+  await b.click(q('[data-act="zoom"][data-arg="1"]'));
+  check("another tap takes the delete back", (await b.text('.side .note [data-act="del-note"]')).trim() === "Delete" && (await count(".side .note")) === 2);
+  await b.click(q('.side .note [data-act="del-note"]'));
+  await b.click(q('.side .note [data-act="del-note"]'), 500);
+  check("the second tap deletes that note and only that one", (await count(".side .note")) === 1 && (await b.text(".side .note")).includes("Why does this step") && (await b.text('[data-act="side"][data-arg="notes"]')).includes("Notes 1") && (await count('.node[data-arg="reply"] .nb')) === 0);
+  await b.go(page("moved-bot", "map"));
+  check("notes are still there after a reload", (await b.text('[data-act="side"][data-arg="notes"]')).includes("Notes 1") && (await b.text('.node[data-arg="receive"] .nb')).trim() === "1");
+  await b.click(q('[data-act="view"][data-arg="runs"]'), 300);
+  check("Runs carries no code tags, note counts or note buttons", (await count(".tag-since")) === 0 && (await count(".node .nb")) === 0 && (await count('[data-act="side"]')) === 0 && (await count(".since-strip")) === 0);
+  await b.click(q('[data-act="view"][data-arg="map"]'), 300);
+
+  // phone width
+  await b.size(390, 800);
+  await b.go(page("moved-bot", "map"));
+  await b.click(q('[data-act="side"][data-arg="since"]'));
+  check("phone: the list of changes fits the width", await b.ev(`document.documentElement.scrollWidth <= 390 && document.querySelector(".side").getBoundingClientRect().width <= 390`));
+  await b.click(q('.side .hop[data-arg="agent"]'));
+  check("phone: the note box can be scrolled to and is wide enough to type in", await b.ev(`(() => { const t = document.querySelector("#note-text"); t.scrollIntoView({ block: "center" }); const r = t.getBoundingClientRect(); return r.width >= 300 && r.bottom <= innerHeight && r.top >= 0 && document.documentElement.scrollWidth <= 390; })()`));
+  await shot("note-390");
+  await b.size(1440, 900);
+
+  // checked again: the flags go
+  await b.go(page("moved-bot", "map"));
+  await b.click(q('[data-act="ask-stamp"]'));
+  await b.click(q('[data-act="stamp"]'), 500);
+  check("marking the map as checked again clears the flags", (await count(".since-strip")) === 0 && (await count(".node.since")) === 0 && (await b.text(".status")).includes("code unchanged since") && JSON.parse(readFileSync(stampFile, "utf-8")).codeVersion === "1.5.0");
+  rmSync(path.join(tmp, "code/src/agent.js"));
+  await b.go(page("moved-bot", "map"));
+  check("a map with broken steps cannot be marked as checked", (await b.text(".status")).includes("2 of 9 anchors broken") && (await count('[data-act="ask-stamp"]')) === 0 && (await b.text(".since-strip")).includes("Fix the broken steps"));
+  await b.go(page("edge-bot", "map"));
+  check("a project whose code is not on this machine is not asked to be checked", (await count(".since-strip")) === 0);
 
   check(`no page errors ${JSON.stringify(b.errors)}`, b.errors.length === 0);
 } catch (err) {

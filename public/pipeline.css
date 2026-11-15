@@ -6,7 +6,7 @@
   --live: #4ade80; --fail: #f87171; --ghost-bg: #140e0e;
   --cold-line: #2a2a2e; --cold-bg: #0e0e10; --cold-ink: #8a8a90;
   --draft: #60a5fa; --draft-bg: #0e1218;
-  /* What a step is for. Kept away from the state colours: red fails, green is live, blue is a draft. */
+  /* What a step is for. Kept away from the state colours: red fails, green is live, blue is a draft or code that moved on. */
   --f-io: #2dd4bf; --f-decide: #fbbf24; --f-ai: #a78bfa; --f-act: #9aa4b2; --f-keep: #f0abfc;
   --r: 6px;
   color-scheme: dark;
@@ -62,6 +62,8 @@ footer.bar { border-top: 1px solid var(--line); margin-top: auto; }
 .btn { min-height: 44px; padding: 0 14px; background: var(--card); border: 1px solid var(--card-line); border-radius: var(--r); display: inline-flex; align-items: center; gap: 8px; }
 .btn.quiet { background: transparent; color: var(--muted); }
 .btn.primary { background: var(--ink); border-color: var(--ink); color: var(--ground); font-weight: 600; }
+.btn[disabled] { opacity: .45; cursor: default; }
+.btn[aria-pressed="true"] { background: var(--seg); border-color: var(--strong); color: var(--ink); }
 .icon-btn { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; border-radius: var(--r); color: var(--muted); flex: none; }
 .icon-btn.boxed { background: var(--card); border: 1px solid var(--card-line); color: var(--ink); }
 .zoom { display: flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
@@ -132,6 +134,12 @@ span.band-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .node.changed .flag { color: var(--draft); }
 .node.faded, .chip.faded { opacity: var(--fade, .35); } .node.far { opacity: .5; }
 .node[aria-expanded="true"] { outline: 1px solid var(--ink); outline-offset: 2px; }
+/* Pinned to a card's edge: its code moved on, it is one of the picked steps, it carries notes. */
+.node.since { box-shadow: 0 0 0 1px var(--draft); }
+.node .tag-since { position: absolute; left: 12px; top: -9px; padding: 0 6px; border-radius: var(--r); background: var(--draft); color: var(--ground); font-size: 10px; font-weight: 600; line-height: 16px; white-space: nowrap; }
+.node.sel { border-color: var(--ink); background: var(--pick); }
+.node .tick { position: absolute; left: -8px; top: -8px; width: 16px; height: 16px; border-radius: 50%; background: var(--ink); color: var(--ground); display: flex; align-items: center; justify-content: center; }
+.node .nb { position: absolute; right: 8px; bottom: -8px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; border: 1px solid var(--strong); border-radius: var(--r); background: var(--card); color: var(--ink); font-size: 10px; line-height: 14px; }
 
 /* Panels */
 .side { flex: 0 0 340px; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bar); border-left: 1px solid var(--line); }
@@ -151,14 +159,26 @@ span.band-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-body { flex: 1; min-height: 0; overflow: auto; }
 .about { margin: 0; padding: 12px 16px 0; line-height: 18px; overflow-wrap: anywhere; }
 .ends { margin: 0; padding: 12px 16px 0; }
-.hops { padding: 12px 8px 0; } .hops h3 { margin: 0 8px 4px; font-size: 10px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
-.hops ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.hops, .notes { padding: 12px 8px 0; } .hops h3, .notes h3 { margin: 0 8px 4px; font-size: 10px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+.hops ul, .notes ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .hop { width: 100%; min-height: 42px; padding: 0 8px; display: flex; align-items: center; gap: 8px; background: transparent; border: 1px solid var(--line); border-radius: var(--r); color: var(--ink); text-align: left; }
 .hop > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hop:active { border-color: var(--strong); background: var(--pick); }
 .chip-in { flex: none; padding: 2px 6px; border: 1px solid var(--card-line); border-radius: var(--r); font-size: 10px; color: var(--muted); }
 .detail { padding: 12px 16px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 14px; overflow: auto; }
 .detail dt { color: var(--muted); } .detail dd { margin: 0; overflow-wrap: anywhere; }
+.hops h3.file { text-transform: none; letter-spacing: 0; color: var(--ink); overflow-wrap: anywhere; }
+.hops .when { margin: 0 8px 6px; font-size: 10px; }
+.notes { padding-bottom: 12px; } .notes ul { gap: 6px; } .notes .none { margin: 0 8px; }
+.note { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r); display: flex; flex-direction: column; gap: 6px; }
+.note p { margin: 0; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.note .meta { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+.note .btn { min-height: 42px; padding: 0 10px; }
+.note-box { padding: 10px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+/* 16 px: a smaller text box makes a phone or tablet zoom the whole page when it is tapped. */
+.note-box textarea { width: 100%; min-height: 68px; max-height: 40vh; padding: 8px 10px; background: var(--ground); border: 1px solid var(--card-line); border-radius: var(--r); color: var(--ink); font: inherit; font-size: 16px; line-height: 20px; resize: vertical; }
+.note-box textarea:focus-visible { outline: 1px solid var(--ink); outline-offset: 1px; }
+.since-strip .row > span { line-height: 16px; }
 
 /* Scrubber */
 .scrub { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; background: var(--bar); border-top: 1px solid var(--line); }
@@ -195,6 +215,8 @@ span.band-h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .body { flex-direction: column; overflow: auto; }
   .main { flex: none; }
   .side { flex: 1 0 360px; border-left: 0; border-top: 1px solid var(--line); }
+  /* Under the map a panel with a note box takes the height it needs: the page scrolls, not a short box inside it. */
+  .side.tall { flex: none; } .side.tall .side-body { flex: none; overflow: visible; }
   .main > footer.bar { margin-top: 0; }
 }
 @media (max-width: 860px) {
