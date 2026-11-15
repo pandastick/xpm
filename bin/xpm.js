@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // XPM command line. Same engine as the web view.
-//   xpm check    <manifest.json> [--repos .xpm-repos.json]
+//   xpm check    <manifest.json> [--repos .xpm-repos.json] [--projects .xpm-projects.json]
 //   xpm runs     <manifest.json> --pipeline ID --events DIR
 //   xpm simulate <manifest.json> --pipeline ID --events DIR --draft draft.json [--spec out.md]
 //   xpm prune    <events-dir> --days 14          (deletes old events AND previews)
@@ -50,10 +50,20 @@ function main() {
   if (cmd === "check") {
     const repos = xpm.loadRepos(a.repos || process.env.XPM_REPOS || path.join(ROOT, ".xpm-repos.json"));
     const report = xpm.checkManifest(manifest, repos);
+    // With a profile that says where the trace calls are, the step ids in the code are compared with the map too.
+    const profile = xpm.loadProfiles(a.projects || process.env.XPM_PROJECTS || path.join(ROOT, ".xpm-projects.json"))[manifest.id];
+    const calls = profile && !xpm.validateProfile(profile).length ? profile.traces?.calls : null;
     for (const r of report) {
+      const p = manifest.pipelines.find((x) => x.id === r.pipeline);
+      const t = calls && !r.errors.length ? xpm.traceCalls(p, repos[profile.truth.repo], calls) : null;
+      if (t && (t.error || t.unknownCount)) r.ok = false;
       console.log(`${r.ok ? "OK  " : "FAIL"} ${r.pipeline}`);
       r.errors.forEach((e) => console.log(`     schema: ${e}`));
       r.anchors.filter((x) => x.status !== "ok").forEach((x) => console.log(`     ${x.status}: ${x.node}${x.detail ? ` (${x.detail})` : ""}`));
+      if (!t) continue;
+      if (t.error) { console.log(`     trace calls: ${t.error}`); continue; }
+      t.unknown.forEach((c) => console.log(`     traced-not-on-map: ${c.id} (${c.file}:${c.line})`));
+      if (t.untraced.length) console.log(`     note: ${t.untraced.length} of ${p.nodes.length} steps have no trace call: ${t.untraced.join(", ")}`);
     }
     return report.every((r) => r.ok) ? 0 : 1;
   }

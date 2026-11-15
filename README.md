@@ -118,6 +118,16 @@ A map is true on the day someone checks it. After that the code moves on. XPM te
 - The version label is optional. XPM reads `package.json` (`version`), then the first version-like word in `VERSION`, in the truth repo; `truth.versionFile` in the source profile names another file. With no version the strip speaks in dates.
 - Fix the map where it is wrong, then mark it as checked again. Nothing here edits the map for you.
 
+### Does the code report the steps the map shows?
+
+Runs can only light a step when the product's code names that step, with the same id, in a trace call. When it does not, a run goes by and the map stays dark. XPM can read the code for those calls and compare the ids with the map, before any run happens.
+
+- Tell XPM where to look with `traces.calls` in the source profile: a file or a folder inside the truth repo. With no pattern it looks for the calls of the drop-in writers (`trace.node(runId, "step")`, `.fail(`, `.decide(`). A product with its own wrapper gives a `pattern`, a regular expression with one group in brackets around the step id.
+- **A step the code reports and the map does not have** is named on the Map with its file and line, and fails `xpm check`. A run through it would show as a ghost.
+- **A step on the map that no trace call names** is counted on the Map, with a list. Its panel says so under "reports to runs". This is a note, not a failure: a step can be real and simply not report itself yet.
+- XPM reads the code as text and runs nothing. An id that is built while the product runs is not seen. Tests, fixtures, build output and backup folders are skipped. Only step ids are compared, not the values a decision reports.
+- It does not block **Mark as checked**: that is about where a step lives in the code, this is about what the runs can show.
+
 ### Notes on steps
 
 Tap a step and write a note in its panel: a question, something to change, something to remember. **Select more steps** turns taps into picks, so one note can be about several steps at once. A step with notes shows a count; **Notes** in the footer lists them all, newest first, and **Show the steps** picks a note's steps on the map. Delete asks for a second tap.
@@ -130,7 +140,7 @@ Stamps and notes are the only things the page writes. They live in XPM's own sta
 npm install
 npm test                                   # engine and layout tests
 npm run test:click                         # a headless browser taps through Map, Runs and Draft (needs Chromium, or CHROMIUM=/path)
-node bin/xpm.js check manifests/example-bot.json --repos .xpm-repos.example.json
+node bin/xpm.js check manifests/example-bot.json --repos .xpm-repos.example.json --projects .xpm-projects.example.json
 node bin/xpm.js runs manifests/example-bot.json --pipeline inbound --events examples/events/example-bot
 node bin/xpm.js simulate manifests/example-bot.json --pipeline inbound \
   --events examples/events/example-bot --draft examples/drafts/example-bot-classifier-first.json
@@ -194,7 +204,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
     "truth":  { "label": "Live files on example-host", "repo": "bot" },
     "mirror": { "label": "GitHub your-org/your-app main", "checkout": "bot-git", "ref": "origin/main", "paths": ["src"], "ignore": ["*.service", "deploy.sh"], "fetch": false },
     "runsOn": "example-host",
-    "traces": { "writer": "the-owner", "previews": false, "neverPreview": ["private chats"] },
+    "traces": { "writer": "the-owner", "previews": false, "neverPreview": ["private chats"], "calls": [{ "path": "src" }] },
     "access": { "label": "The owner's Tailscale login only" },
     "mapOwner": "the-owner",
     "confirmed": { "by": "the-owner", "at": "2026-11-09", "note": "every anchor checked against the live files" }
@@ -209,6 +219,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | `mirror` | Optional. A git checkout (repo name or absolute path) and a ref to compare the truth with, file by file over `paths` (`prefix` when the mirror keeps them in a subfolder). XPM reports the drift; it never enforces it. `fetch: true` lets XPM run `git fetch` first. `ignore` lists files to leave out on both sides (`"*.service"` matches a file name anywhere, `"deploy/*.sh"` a path). Folders with `backup` in their name are always left out. |
 | `runsOn` | The machine where the truth and the traces are readable. On any other machine Setup says so. |
 | `traces` | Who writes them, whether previews of typed text are on, and what is never previewed. The events folder itself is `XPM_EVENTS_DIR/<project>`. Previews are shown only when `previews` is `true` here, whatever is on disk. |
+| `traces.calls` | Optional. Where the code names its steps to the tracer: a list of `{ "path", "pattern", "pipeline" }`. `path` is a file or folder inside the truth repo. `pattern` is optional, a regular expression (300 characters at most) with one group in brackets around the step id, for example `"markStep\\('([\\w-]+)'\\)"`. `pipeline` is optional and keeps the entry to one pipeline. See "Does the code report the steps the map shows?". |
 | `access` | A label. The real gate is `XPM_ALLOWED_LOGINS` or `XPM_ALLOWED_NODES`. A project with no gate that is reachable from other devices is flagged in Setup, previews or not (unless `public: true`, for synthetic data). |
 | `mapOwner`, `confirmed` | Who confirms the map against the truth, and when they last did, written by hand. **Mark as checked** on the Map is the live form of this: it also notices when the code moves on. |
 
@@ -232,7 +243,7 @@ XPM adapts to each product; it never asks a product to change how it deploys. Ea
 | `POST /api/project/:id/pipeline/:pid/notes` | saves a note `{ nodes: [step ids], text }`; returns the notes |
 | `DELETE /api/project/:id/pipeline/:pid/notes/:noteId` | deletes one note; returns the notes |
 
-The pipeline answer also carries `since` (the last check, the code version, the steps and files that changed) and `notes`. The three writing routes are the only ones that write, and only into the state folder.
+The pipeline answer also carries `check.traces` (the steps the code reports, the ones it reports that the map lacks, and the map's steps no trace call names; `null` when the profile names no trace calls), `since` (the last check, the code version, the steps and files that changed) and `notes`. The three writing routes are the only ones that write, and only into the state folder.
 
 ### Credits
 

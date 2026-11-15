@@ -103,6 +103,8 @@ const isGhostRun = (r) => r.path.some((id) => !pipeline().nodes.some((n) => n.id
 const since = () => S.data?.since || null;
 const sinceIds = () => new Set(since()?.changed || []);
 const notes = () => S.data?.notes || [];
+// Which steps the code reports to the tracer. Null when the project's profile does not say where to look.
+const traces = () => S.data?.check?.traces || null;
 const notesOn = (ids) => { const set = new Set(ids); return notes().filter((n) => n.nodes.some((id) => set.has(id))); };
 
 function outcome(path, run, p = pipeline()) {
@@ -385,7 +387,7 @@ function viewMap() {
   const body = canvas(p, L, lookPick, edgeLook);
   const ghosts = S.data.overlay.ghosts || [];
   const note = `hits and median time · last ${S.data.runs.length} runs · updated ${agoWords(S.fetchedAt)}`;
-  const strip = setupStrips() + sinceStrip() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
+  const strip = setupStrips() + sinceStrip() + traceStrips() + (ghosts.length ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>${ghosts.length} ${ghosts.length === 1 ? "step" : "steps"} ran that the map does not know: ${ghosts.map((g) => `<b>${esc(g.id)}</b> (${g.hits} runs)`).join(", ")}</span></div><button type="button" class="btn" data-act="view" data-arg="runs" data-filter="ghost">See them in Runs</button></div>` : "");
   if (ghosts.length) states.add("ghost");
   // Runs that carry no steps: say it once, or the map looks broken.
   const bare = S.data.runs.length - (S.data.overlay.tracedCount || 0);
@@ -396,7 +398,7 @@ function viewMap() {
   const lens = (full.lanes || []).length > 1 ? `<div class="seg" role="group" aria-label="Lens"><button type="button" aria-pressed="${S.lens === "overview"}" data-act="lens" data-arg="overview">Overview</button><button type="button" aria-pressed="${S.lens === "all"}" data-act="lens" data-arg="all">All steps</button></div>` : "";
   const all = notes().length;
   const notesBtn = all ? `<button type="button" class="btn quiet" data-act="side" data-arg="notes" aria-pressed="${S.side === "notes" && !S.multi && !S.panelNode}">${SVG.note}Notes ${all}</button>` : "";
-  const side = S.multi ? selPanel() : S.panelNode ? nodePanel(S.panelNode) : S.side === "since" ? sincePanel() : S.side === "notes" ? notesPanel() : "";
+  const side = S.multi ? selPanel() : S.panelNode ? nodePanel(S.panelNode) : S.side === "since" ? sincePanel() : S.side === "notes" ? notesPanel() : S.side === "untraced" ? untracedPanel() : "";
   return `<div class="body"><main class="main">${strip}${blind}${cleaned}${body}${footer(states, note, true, lens + notesBtn)}</main>${side}</div>`;
 }
 
@@ -423,6 +425,28 @@ function sinceStrip() {
   const moved = n ? ` ${plural(n, "step sits", "steps sit")} in ${plural(sn.files.length, "file")} that changed since.` : "";
   const added = u ? ` ${plural(u, "step was", "steps were")} added to the map, or pointed at another file, after that check.` : "";
   return `<div class="strip since-strip"><div class="row"><b class="blue">${n ? "Code moved:" : "Map edited:"}</b><span>${head}${moved}${added}</span>${err}</div><div class="row"><button type="button" class="btn" data-act="side" data-arg="since" aria-pressed="${S.side === "since" && !S.multi && !S.panelNode}">See what changed</button>${blocked ? `<span class="muted">Fix the broken steps before marking the map as checked.</span>` : mark}</div></div>`;
+}
+
+// Runs light a step only when the code names it, with the map's id, in a trace call. XPM reads the code for those calls.
+function traceStrips() {
+  const t = traces();
+  if (!t) return "";
+  if (t.error) return `<div class="strip quiet"><div class="row"><span class="muted">XPM could not read the trace calls: ${esc(t.error)}.</span></div></div>`;
+  const un = t.unknown || [], n = t.unknownCount || un.length;
+  const ghost = n ? `<div class="strip"><div class="row"><span class="sq-ghost"></span><span>The code reports ${plural(n, "step")} this map does not have: ${un.slice(0, 6).map((c) => `<b>${esc(c.id)}</b> <span class="muted">(${esc(c.file)} line ${c.line})</span>`).join(", ")}${n > 6 ? ` and ${n - 6} more` : ""}. A run through ${n === 1 ? "it" : "them"} shows as a ghost.</span></div></div>` : "";
+  const dark = t.untraced.length;
+  const total = pipeline().nodes.length;
+  const say = dark === total ? `None of the ${total} steps is named in a trace call in the code, so Runs cannot light this map.` : `${dark} of ${total} steps ${dark === 1 ? "is" : "are"} not named in any trace call in the code, so Runs cannot light ${dark === 1 ? "it" : "them"}.`;
+  const quiet = dark ? `<div class="strip quiet"><div class="row"><span class="muted">${say}</span></div><button type="button" class="btn quiet" data-act="side" data-arg="untraced" aria-pressed="${S.side === "untraced" && !S.multi && !S.panelNode}">See ${dark === 1 ? "it" : "them"}</button></div>` : "";
+  return ghost + quiet;
+}
+
+function untracedPanel() {
+  const t = traces();
+  if (!t || t.error) return "";
+  return `<aside class="side" aria-label="Steps the code never reports"><div class="side-h"><div class="top"><span class="title"><b>Not reported by the code</b><span>${plural(t.untraced.length, "step")} · read from ${plural(t.files, "file")}</span></span>${closeBtn("Close the list")}</div></div>
+    <div class="side-body"><section class="hops"><h3>no trace call names these</h3><ul>${t.untraced.map((id) => stepHop(id)).join("")}</ul></section></div>
+    <div class="side-foot">XPM reads the code as text. A step whose id is built while the product runs is not seen here.</div></aside>`;
 }
 
 const stepHop = (id, act = "goto", tail = "") => `<li><button type="button" class="hop" data-act="${act}" data-arg="${esc(id)}"><i class="fd f-${FAMILY[pipeline().nodes.find((y) => y.id === id)?.kind] || ""}"></i><span>${esc(nodeName(id))}</span>${tail}</button></li>`;
@@ -488,9 +512,12 @@ function nodePanel(id) {
   const status = !chk ? "" : chk.status === "ok" ? "found in the code" : chk.status === "unanchored" ? "no anchor yet" : `<span class="red">${esc(chk.status.replace("-", " "))}${chk.detail ? `: ${esc(chk.detail)}` : ""}</span>`;
   const sn = since();
   const moved = !sn?.stamp || !a.path ? "" : sn.changed.includes(id) ? `<span class="blue">its file changed since the check on ${esc(day(sn.stamp.takenAt))}</span>` : sn.uncovered.includes(id) ? "not covered by the last check" : `same since the check on ${esc(day(sn.stamp.takenAt))}`;
+  const t = traces();
+  const call = t && !t.error ? t.traced.find((c) => c.id === id) : null;
+  const reported = !t || t.error ? "" : call ? `in ${esc(call.file)}, line ${call.line}` : '<span class="muted">no trace call names this step, so Runs cannot light it</span>';
   const rows = [
     ["kind", `${FAMILY[n.kind] ? `<i class="fd f-${FAMILY[n.kind]}"></i> ` : ""}${esc(n.kind)}${FAMILY[n.kind] ? ` <span class="muted">· ${famLabel(FAMILY[n.kind]).toLowerCase()}</span>` : ""}`], ["lane", esc(n.lane || "")], ["owner", esc(n.owner || "")],
-    ["repo", esc(a.repo || "")], ["file", esc(a.path || "")], ["function", esc(a.symbol || "")], ["code check", status], ["code since", moved],
+    ["repo", esc(a.repo || "")], ["file", esc(a.path || "")], ["function", esc(a.symbol || "")], ["code check", status], ["code since", moved], ["reports to runs", reported],
     ["decides", esc(n.decides || "")], ["last 50 runs", `${s.hits || 0} hits${s.medianMs != null ? `, median ${ms(s.medianMs)}` : ""}${s.failures ? `, <span class="red">${s.failures} failed</span>` : ""}`],
   ].filter(([, v]) => v);
   const name = (x) => p.nodes.find((y) => y.id === x)?.name || x;
