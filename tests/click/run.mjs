@@ -22,6 +22,7 @@ const variant = (id, change) => { const m = JSON.parse(JSON.stringify(example));
 variant("edge-bot", () => {});
 variant("broken-bot", (m) => { m.pipelines[0].nodes[1].kind = "wizard"; m.pipelines[0].edges.push({ from: "receive", to: "nowhere" }); });
 variant("noname-bot", (m) => { delete m.name; });
+variant("bare-bot", () => {});
 const at = (agoMs) => new Date(Date.now() - agoMs).toISOString();
 const line = (runId, agoMs, seq, type, node, metadata = {}) => JSON.stringify({ runId, ts: at(agoMs), seq, pipeline: "inbound", type, ...(node ? { node } : {}), metadata });
 mkdirSync(path.join(tmp, "events/edge-bot"), { recursive: true });
@@ -32,6 +33,13 @@ writeFileSync(path.join(tmp, "events/edge-bot", `${at(20000).slice(0, 10)}.jsonl
   line("done000000000001", 19970, 4, "run.completed"),
   "this line is not JSON",
   line("fresh00000000002", 5000, 1, "run.started"),
+].join("\n") + "\n");
+
+// A product that reports only that a message came and went: two runs, no step in either.
+mkdirSync(path.join(tmp, "events/bare-bot"), { recursive: true });
+writeFileSync(path.join(tmp, "events/bare-bot", `${at(20000).slice(0, 10)}.jsonl`), [
+  line("bare000000000001", 20000, 1, "run.started"), line("bare000000000001", 19600, 2, "run.completed"),
+  line("bare000000000002", 9000, 1, "run.started"), line("bare000000000002", 8500, 2, "run.completed"),
 ].join("\n") + "\n");
 
 // ---------- the app and the browser ----------
@@ -212,6 +220,15 @@ try {
   await b.click(q('[data-act="view"][data-arg="map"]'), 300);
   check("the map says when events were skipped or cleaned", /1 event line was unreadable/.test(await b.text("main")) && /1 decision value was not a known label/.test(await b.text("main")));
   check("the cleaned decision word is not on the page", !(await b.ev(`document.documentElement.innerHTML.includes("a-word-the-map-does-not-name")`)));
+
+  // ---------- runs that carry no steps ----------
+  await b.go(page("bare-bot", "map"));
+  check("runs with no steps do not turn the map cold or print 0 hits", (await count(".node")) === 9 && (await count(".node.cold")) === 0 && !(await b.text(".stage")).includes("hits"));
+  check("the map says once that the runs recorded no steps", (await b.text("main")).includes("All 2 runs on record recorded only a start and an end"));
+  await b.click(q('[data-act="view"][data-arg="runs"]'), 300);
+  check("a finished run with no steps says there is no path to light", (await b.text(".strip")).includes("no steps recorded") && (await b.text(".strip")).includes("no path to light") && (await count(".scrub")) === 0 && (await count(".node.path")) === 0);
+  await b.go(page("edge-bot", "map"));
+  check("a mix of runs counts only the ones with steps", (await b.text("main")).includes("1 of the last 2 runs recorded only a start and an end") && (await b.text('.node[data-arg="receive"]')).includes("1 hit ·"));
 
   // ---------- a map the engine refuses ----------
   await b.go(page("broken-bot", "map"));
